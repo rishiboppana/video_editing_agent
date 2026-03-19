@@ -1,7 +1,7 @@
 import requests
 import json
 from trim_tool import trim_video
-
+from speech_to_text import speech_to_text 
 OLLAMA_URL = "http://localhost:11434/api/generate"
 
 def ask_llm(prompt):
