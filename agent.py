@@ -50,7 +50,7 @@ Return ONLY JSON in this exact format:
 
 
 def run_agent(user_prompt):
-
+    
     result = ask_llm(user_prompt)
 
     tool_name = result.get("tool")
@@ -75,7 +75,9 @@ def run_agent(user_prompt):
 
 if __name__ == "__main__":
 
-    instruction = input("Enter instruction: ")
+    # instruction = input("Enter instruction: ")
+    instruction = speech_to_text("audio/first4seconds.wav")
+    print("User prompt:", instruction)
 
     output = run_agent(instruction)
 

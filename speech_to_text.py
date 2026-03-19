@@ -1,10 +1,10 @@
 import google.generativeai as genai
 
-genai.configure(api_key="YOUR_GEMINI_API_KEY")
+genai.configure(api_key="AIzaSyACoa3A8hr2SpBiQOfp6YtdAf-7gUCFasE")
 
 def speech_to_text(audio_path):
 
-    model = genai.GenerativeModel("gemini-1.5-pro")
+    model = genai.GenerativeModel("gemini-2.5-flash")
 
     with open(audio_path, "rb") as f:
         audio_bytes = f.read()
