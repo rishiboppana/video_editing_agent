@@ -32,7 +32,7 @@ def normalize_video(input_path, output_path):
     command = [
         "ffmpeg",
         "-i", input_path,
-        "-vf", "scale=1280:720",
+        "-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
         "-r", "30",
         "-c:v", "libx264",
         "-c:a", "aac",
