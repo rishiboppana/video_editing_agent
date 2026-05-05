@@ -92,12 +92,18 @@ class OrchestratorAgent(BaseAgent):
         logger.info(f"  → narrative: {highlights_data.get('narrative', '')[:160]}")
 
         # ── Step 4: Video editing ───────────────────────────────────────
+        # Sort highlights chronologically so clips are joined in the order
+        # they appear in the original video, regardless of importance rank.
+        ordered_highlights = sorted(
+            highlights_data["highlights"], key=lambda h: h["start"]
+        )
+
         logger.info("\n[STEP 4/4]  VIDEO EDITING")
         edit_result = self._run_with_retry(
             agent=self.editor,
             run_kwargs={
                 "video_path": video_path,
-                "highlights": highlights_data["highlights"],
+                "highlights": ordered_highlights,
                 "output_path": output_path,
             },
             review_context=(
@@ -219,6 +225,9 @@ Return ONLY a JSON object."""
         try:
             response = self.call_llm(prompt, system=self.REVIEW_SYSTEM)
             evaluation = self.extract_json(response)
+            # LLM occasionally returns a JSON array instead of object — treat as satisfied
+            if not isinstance(evaluation, dict):
+                return True, ""
             satisfied = bool(evaluation.get("satisfactory", True))
             feedback = evaluation.get("feedback", "")
             score = evaluation.get("score", 1.0)

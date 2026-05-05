@@ -1,24 +1,30 @@
 import os
 import shutil
 
-# Ollama
+# ── Ollama ────────────────────────────────────────────────────────────
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
-# Whisper
+# ── Whisper ───────────────────────────────────────────────────────────
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base")
 
-# Video pipeline
+# ── Video pipeline ────────────────────────────────────────────────────
 MAX_HIGHLIGHT_DURATION = int(os.getenv("MAX_HIGHLIGHT_DURATION", "60"))
 OUTPUT_DIR = os.getenv("OUTPUT_DIR", "output")
 
-# Orchestrator
+# ── Orchestrator ──────────────────────────────────────────────────────
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 
-# Vision model (used to describe video frames — must be a multimodal Ollama model)
+# ── Vision (LLaVA frame description) ─────────────────────────────────
+# Requires a GPU (NVIDIA CUDA or Apple Silicon MPS) for practical speed.
+# Set ENABLE_VISION=false only if running on CPU-only hardware temporarily.
+ENABLE_VISION = os.getenv("ENABLE_VISION", "true").lower() in ("1", "true", "yes")
+
 VISION_MODEL = os.getenv("VISION_MODEL", "llava")
-# Max visual segments to describe via LLaVA (caps processing time on long videos)
 MAX_VISUAL_DESCRIPTIONS = int(os.getenv("MAX_VISUAL_DESCRIPTIONS", "20"))
+VISION_TIMEOUT = int(os.getenv("VISION_TIMEOUT", "180"))
+VISION_MULTI_FRAME_MIN = float(os.getenv("VISION_MULTI_FRAME_MIN", "15.0"))
+VISION_MAX_CONSECUTIVE_FAILURES = int(os.getenv("VISION_MAX_CONSECUTIVE_FAILURES", "2"))
 
 # ── FFmpeg Discovery ──────────────────────────────────────────────────
 _FFMPEG_FALLBACKS = [

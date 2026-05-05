@@ -3,15 +3,21 @@ from agents.base_agent import BaseAgent
 
 class ExplainerAgent(BaseAgent):
     """
-    Uses Ollama to build a semantic understanding of the video by combining:
-      - speech transcription (what was said)
-      - visual descriptions (what was seen, per scene)
-    Produces a summary, topics, tone, pacing, and per-segment importance scores.
+    Uses Ollama to build semantic understanding of the video.
+
+    Key enhancement: for every speech segment the prompt now includes the
+    visual description of what was concurrently on screen.  This lets the LLM
+    reason about *what was said* and *what was seen* at the same moment rather
+    than treating audio and visual as two separate streams.
+
+    Timeline format sent to the LLM:
+      [SPEECH 3.2s-7.8s | visual: person on stage gesturing to crowd]: "welcome everyone"
+      [VISUAL 8.0s-14.5s]: Close-up of instruments being set up on stage.
     """
 
     SYSTEM = (
         "You are an expert video content analyst. "
-        "You analyze both speech transcripts and visual scene descriptions to understand video content. "
+        "You analyze synchronized speech and visual scene data to understand video content. "
         "Always respond with ONLY a valid JSON object — no prose, no markdown fences."
     )
 
@@ -19,57 +25,86 @@ class ExplainerAgent(BaseAgent):
         audio_segs = transcript.get("segments", [])
         visual_segs = transcript.get("visual_segments", [])
 
-        # Combine audio + visual entries and sort by start time (float) BEFORE
-        # formatting into strings — avoids any fragile string-parsing of timestamps.
+        # Build a fast lookup: for any point in time, which visual description applies?
+        # This lets us annotate every speech segment with what was on screen.
+        def visual_desc_at(start: float, end: float) -> str:
+            overlapping = [
+                v.get("description", "")
+                for v in visual_segs
+                if v["start"] < end and v["end"] > start
+                and v.get("description", "").strip()
+                and "not individually analyzed" not in v.get("description", "")
+                and "unavailable" not in v.get("description", "")
+            ]
+            return overlapping[0] if overlapping else ""
+
         all_entries = []
+
+        # Speech segments — annotated with the concurrent visual description
         for s in audio_segs:
-            all_entries.append({
-                "start": float(s["start"]),
-                "label": f"[SPEECH {s['start']}s-{s['end']}s]: {s['text']}",
-            })
+            concurrent = visual_desc_at(s["start"], s["end"])
+            if concurrent:
+                label = (
+                    f"[SPEECH {s['start']}s-{s['end']}s | visual: {concurrent}]: "
+                    f"\"{s['text']}\""
+                )
+            else:
+                label = f"[SPEECH {s['start']}s-{s['end']}s]: \"{s['text']}\""
+            all_entries.append({"start": float(s["start"]), "label": label})
+
+        # Visual-only segments (stand-alone scenes with no concurrent speech shown above)
+        speech_times = {(s["start"], s["end"]) for s in audio_segs}
         for v in visual_segs:
-            desc = v.get("description", "[no description]")
-            all_entries.append({
-                "start": float(v["start"]),
-                "label": f"[VISUAL {v['start']}s-{v['end']}s]: {desc}",
-            })
+            # Only show visual as a standalone line if it doesn't overlap with any speech
+            has_speech = any(
+                s_start < v["end"] and s_end > v["start"]
+                for s_start, s_end in speech_times
+            )
+            if not has_speech:
+                desc = v.get("description", "[no description]")
+                all_entries.append({
+                    "start": float(v["start"]),
+                    "label": f"[VISUAL {v['start']}s-{v['end']}s]: {desc}",
+                })
 
         all_entries.sort(key=lambda e: e["start"])
         content_block = "\n".join(e["label"] for e in all_entries)
 
         feedback_block = f"\nPREVIOUS ATTEMPT FEEDBACK:\n{feedback}\n" if feedback else ""
 
-        prompt = f"""You have both the speech transcript and visual scene descriptions of a video.
-Analyze the combined audio-visual content and return a JSON object with these exact keys:
+        prompt = f"""Analyze this video's synchronized speech and visual content.
+Each SPEECH line shows what was said and (when available) what was visually on screen at that moment.
+Each VISUAL line shows a scene with no concurrent speech.
 
-- "summary": 2-3 sentence description synthesizing what was said AND what was seen
+Return a JSON object with:
+- "summary": 2-3 sentences synthesizing what was said AND what was seen
 - "topics": list of main topics (strings)
-- "tone": overall tone (e.g. comedic, musical, action, educational, emotional, informal)
-- "pacing": description of visual rhythm (e.g. fast-paced cuts, slow cinematic, talking-head)
-- "key_moments": list of the most impactful moments, each with "start", "end", "description"
-- "segments": list covering ALL entries below, each with:
-    - "id": the original segment id (integer for speech, "v0"/"v1" etc for visual)
-    - "start": start time in seconds
-    - "end": end time in seconds
-    - "text": the speech text, or the visual description
-    - "importance": float 0.0–1.0 (1.0 = most important for a highlight reel)
-    - "reason": one sentence explaining why this segment has this importance score
+- "tone": overall tone (e.g. comedic, musical, action, educational, emotional)
+- "pacing": visual rhythm (e.g. fast cuts, slow cinematic, static talking-head)
+- "key_moments": most impactful moments, each with "start", "end", "description"
+- "segments": ALL speech and standalone visual entries listed below, each with:
+    - "id": original id (integer for speech, "v0"/"v1"/etc for visual)
+    - "start": start seconds
+    - "end": end seconds
+    - "text": the speech quote or visual description
+    - "importance": 0.0–1.0 (1.0 = must be in the highlight reel)
+    - "reason": one sentence on why this score
 
 Video overview:
-  Duration  : {transcript.get('duration', '?')}s
-  Speech    : {len(audio_segs)} segments
-  Visual    : {len(visual_segs)} scene segments
+  Duration : {transcript.get('duration', '?')}s
+  Speech   : {len(audio_segs)} segments
+  Visual   : {len(visual_segs)} scenes
 
-Timeline (chronological):
+Synchronized timeline:
 {content_block}
 {feedback_block}
 Return ONLY a JSON object."""
 
         response = self.call_llm(prompt, system=self.SYSTEM)
         result = self.extract_json(response)
-
-        # Guarantee all original segments survive even if the LLM skipped them
-        result["segments"] = self._merge_all_segments(audio_segs, visual_segs, result.get("segments", []))
+        result["segments"] = self._merge_all_segments(
+            audio_segs, visual_segs, result.get("segments", [])
+        )
         return result
 
     def validate(self, output: dict, **kwargs) -> tuple:
@@ -97,21 +132,26 @@ Return ONLY a JSON object."""
 
         for seg in audio:
             key = str(seg["id"])
-            merged.append(scored_map.get(key, {**seg, "importance": 0.4, "reason": "Not individually analyzed"}))
+            merged.append(
+                scored_map.get(key, {**seg, "importance": 0.4, "reason": "Not individually analyzed"})
+            )
 
         audio_duration = sum(s["end"] - s["start"] for s in audio)
-        is_sparse_audio = audio_duration < 5.0  # less than 5s of speech → visual-dominant video
+        is_sparse_audio = audio_duration < 5.0
 
         for seg in visual:
             key = str(seg["id"])
             if key in scored_map:
                 scored_seg = scored_map[key]
-                # Always include visual segments for sparse-audio videos;
-                # otherwise only include if the LLM rated them important enough
                 if is_sparse_audio or float(scored_seg.get("importance", 0)) >= 0.5:
                     merged.append(scored_seg)
             elif is_sparse_audio:
                 desc = seg.get("description", "[visual scene]")
-                merged.append({**seg, "text": desc, "importance": 0.4, "reason": "Visual-dominant video filler"})
+                merged.append({
+                    **seg,
+                    "text": desc,
+                    "importance": 0.4,
+                    "reason": "Visual-dominant video filler",
+                })
 
         return sorted(merged, key=lambda x: float(x.get("start", 0)))
