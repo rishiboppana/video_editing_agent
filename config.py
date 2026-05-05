@@ -15,6 +15,11 @@ OUTPUT_DIR = os.getenv("OUTPUT_DIR", "output")
 # Orchestrator
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 
+# Vision model (used to describe video frames — must be a multimodal Ollama model)
+VISION_MODEL = os.getenv("VISION_MODEL", "llava")
+# Max visual segments to describe via LLaVA (caps processing time on long videos)
+MAX_VISUAL_DESCRIPTIONS = int(os.getenv("MAX_VISUAL_DESCRIPTIONS", "20"))
+
 # ── FFmpeg Discovery ──────────────────────────────────────────────────
 _FFMPEG_FALLBACKS = [
     "/opt/homebrew/bin/ffmpeg",   # Apple Silicon
