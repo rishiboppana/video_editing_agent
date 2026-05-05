@@ -1,0 +1,9 @@
+# Core AI / ML
+openai-whisper>=20231117
+requests>=2.31.0
+
+# Video processing (ffmpeg must be installed separately via brew/apt)
+# brew install ffmpeg
+
+# Utilities
+numpy>=1.24.0
