@@ -2,61 +2,73 @@ from agents.base_agent import BaseAgent
 
 
 class ExplainerAgent(BaseAgent):
-    """Uses Ollama to semantically analyze the transcript and score every segment."""
+    """
+    Uses Ollama to build a semantic understanding of the video by combining:
+      - speech transcription (what was said)
+      - visual descriptions (what was seen, per scene)
+    Produces a summary, topics, tone, pacing, and per-segment importance scores.
+    """
 
     SYSTEM = (
         "You are an expert video content analyst. "
-        "You analyze transcripts and return structured JSON. "
+        "You analyze both speech transcripts and visual scene descriptions to understand video content. "
         "Always respond with ONLY a valid JSON object — no prose, no markdown fences."
     )
 
     def run(self, transcript: dict, feedback: str = "") -> dict:
         audio_segs = transcript.get("segments", [])
         visual_segs = transcript.get("visual_segments", [])
-        
-        # Combine information for the LLM
-        segs_info = []
+
+        # Combine audio + visual entries and sort by start time (float) BEFORE
+        # formatting into strings — avoids any fragile string-parsing of timestamps.
+        all_entries = []
         for s in audio_segs:
-            segs_info.append(f"[AUDIO] {s['start']}s-{s['end']}s: {s['text']}")
+            all_entries.append({
+                "start": float(s["start"]),
+                "label": f"[SPEECH {s['start']}s-{s['end']}s]: {s['text']}",
+            })
         for v in visual_segs:
-            segs_info.append(f"[VISUAL Scene Cut] {v['start']}s-{v['end']}s")
-            
-        segments_text = "\n".join(segs_info)
+            desc = v.get("description", "[no description]")
+            all_entries.append({
+                "start": float(v["start"]),
+                "label": f"[VISUAL {v['start']}s-{v['end']}s]: {desc}",
+            })
 
-        feedback_block = ""
-        if feedback:
-            feedback_block = f"\n\nPREVIOUS ATTEMPT FEEDBACK (fix these issues):\n{feedback}\n"
+        all_entries.sort(key=lambda e: e["start"])
+        content_block = "\n".join(e["label"] for e in all_entries)
 
-        prompt = f"""Analyze the video content information below and return a JSON object with these exact keys:
+        feedback_block = f"\nPREVIOUS ATTEMPT FEEDBACK:\n{feedback}\n" if feedback else ""
 
-- "summary": 2-3 sentence description of the content context (synthesis of audio and visual structure)
+        prompt = f"""You have both the speech transcript and visual scene descriptions of a video.
+Analyze the combined audio-visual content and return a JSON object with these exact keys:
+
+- "summary": 2-3 sentence description synthesizing what was said AND what was seen
 - "topics": list of main topics (strings)
-- "tone": overall tone (e.g. comedic, musical, action, technical, informal)
-- "pacing": description of the visual rhythm (e.g. fast-paced cuts, slow cinematic shots)
-- "key_moments": list of potential highlights, each with "start", "end", "description"
-- "segments": list covering ALL AUDIO segments plus key VISUAL segments, each with:
-    - "id": segment id (e.g. integer for audio, "v0" etc for visual)
+- "tone": overall tone (e.g. comedic, musical, action, educational, emotional, informal)
+- "pacing": description of visual rhythm (e.g. fast-paced cuts, slow cinematic, talking-head)
+- "key_moments": list of the most impactful moments, each with "start", "end", "description"
+- "segments": list covering ALL entries below, each with:
+    - "id": the original segment id (integer for speech, "v0"/"v1" etc for visual)
     - "start": start time in seconds
     - "end": end time in seconds
-    - "text": description or transcription text
-    - "importance": float 0.0–1.0 (1.0 = most important)
-    - "reason": one sentence explaining the importance score
+    - "text": the speech text, or the visual description
+    - "importance": float 0.0–1.0 (1.0 = most important for a highlight reel)
+    - "reason": one sentence explaining why this segment has this importance score
 
-Overview:
-Video Duration: {transcript.get('duration')}s
-Number of speech segments: {len(audio_segs)}
-Number of visual scene changes: {len(visual_segs)}
+Video overview:
+  Duration  : {transcript.get('duration', '?')}s
+  Speech    : {len(audio_segs)} segments
+  Visual    : {len(visual_segs)} scene segments
 
-Content Details:
-{segments_text}
-
+Timeline (chronological):
+{content_block}
 {feedback_block}
 Return ONLY a JSON object."""
 
         response = self.call_llm(prompt, system=self.SYSTEM)
         result = self.extract_json(response)
 
-        # Merge segments to ensure original audio segments are preserved
+        # Guarantee all original segments survive even if the LLM skipped them
         result["segments"] = self._merge_all_segments(audio_segs, visual_segs, result.get("segments", []))
         return result
 
@@ -64,41 +76,42 @@ Return ONLY a JSON object."""
         for field in ("summary", "topics", "tone", "segments"):
             if field not in output:
                 return False, f"Missing required field: {field}"
-        return True, f"{len(output['segments'])} segments processed"
+        if not output["summary"].strip():
+            return False, "summary is empty"
+        if not output["segments"]:
+            return False, "segments list is empty"
+        for seg in output["segments"]:
+            if "importance" not in seg:
+                return False, f"Segment {seg.get('id')} missing importance"
+            try:
+                score = float(seg["importance"])
+            except (TypeError, ValueError):
+                return False, f"Segment {seg.get('id')} has non-numeric importance"
+            if not 0.0 <= score <= 1.0:
+                return False, f"Segment {seg.get('id')} importance {score} out of [0,1]"
+        return True, f"{len(output['segments'])} segments analyzed"
 
     def _merge_all_segments(self, audio: list, visual: list, scored: list) -> list:
         scored_map = {str(s.get("id")): s for s in scored}
         merged = []
-        
-        # Ensure all audio segments are included
-        for a in audio:
-            aid = str(a["id"])
-            if aid in scored_map:
-                merged.append(scored_map[aid])
-            else:
-                merged.append({**a, "importance": 0.5, "reason": "Default audio importance"})
-                
-        # Include high-importance visual segments or all if audio is sparse
-        audio_coverage = sum(a["end"] - a["start"] for a in audio)
-        is_sparse = audio_coverage < 5.0
-        
-        for v in visual:
-            vid = str(v["id"])
-            if vid in scored_map:
-                # Only include visual if LLM scored it high or if audio is sparse
-                if is_sparse or scored_map[vid].get("importance", 0) > 0.6:
-                    merged.append(scored_map[vid])
-            elif is_sparse:
-                merged.append({**v, "text": "[Visual Scene]", "importance": 0.4, "reason": "Synthetic visual filler"})
-                
-        return sorted(merged, key=lambda x: x["start"])
 
-    def _merge_segments(self, originals: list, scored: list) -> list:
-        scored_map = {s["id"]: s for s in scored if "id" in s}
-        merged = []
-        for orig in originals:
-            if orig["id"] in scored_map:
-                merged.append(scored_map[orig["id"]])
-            else:
-                merged.append({**orig, "importance": 0.3, "reason": "Not individually analyzed"})
-        return merged
+        for seg in audio:
+            key = str(seg["id"])
+            merged.append(scored_map.get(key, {**seg, "importance": 0.4, "reason": "Not individually analyzed"}))
+
+        audio_duration = sum(s["end"] - s["start"] for s in audio)
+        is_sparse_audio = audio_duration < 5.0  # less than 5s of speech → visual-dominant video
+
+        for seg in visual:
+            key = str(seg["id"])
+            if key in scored_map:
+                scored_seg = scored_map[key]
+                # Always include visual segments for sparse-audio videos;
+                # otherwise only include if the LLM rated them important enough
+                if is_sparse_audio or float(scored_seg.get("importance", 0)) >= 0.5:
+                    merged.append(scored_seg)
+            elif is_sparse_audio:
+                desc = seg.get("description", "[visual scene]")
+                merged.append({**seg, "text": desc, "importance": 0.4, "reason": "Visual-dominant video filler"})
+
+        return sorted(merged, key=lambda x: float(x.get("start", 0)))
