@@ -1,8 +1,7 @@
 import subprocess
 
-def trim_video(video_path, start_time, end_time):
 
-    output_path = "videos/trimmed2.mp4"
+def trim_video(video_path, start_time, end_time, output_path="videos/trimmed2.mp4"):
 
     command = [
         "ffmpeg",
@@ -12,6 +11,6 @@ def trim_video(video_path, start_time, end_time):
         output_path
     ]
 
-    subprocess.run(command)
+    subprocess.run(command, check=True)
 
     return output_path

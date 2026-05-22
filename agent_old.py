@@ -1,4 +1,8 @@
-import argparse
+"""
+Same behavior as agent.py but always uses Ollama model llama3:latest (no OLLAMA_MODEL env).
+Use on hosts with enough RAM (~8+ GiB free recommended). For small instances use agent.py
+with OLLAMA_MODEL=llama3.2:3b instead.
+"""
 import json
 import os
 import subprocess
@@ -11,12 +15,11 @@ from speech_to_text import speech_to_text
 from trim_tool import trim_video
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
-# Override on small RAM hosts, e.g.: OLLAMA_MODEL=llama3.2:3b python agent.py
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3:latest")
+OLLAMA_MODEL_FIXED = "llama3:latest"
+DEFAULT_TRIM_INPUT = "videos/1_feb5.mp4"
 
 
 def get_video_duration_seconds(video_path):
-    """Return container duration in seconds (float) using ffprobe."""
     if not os.path.isfile(video_path):
         raise FileNotFoundError(video_path)
     result = subprocess.run(
@@ -44,21 +47,18 @@ You are a video editing agent.
 You have access to the following tools:
 
 1. trim_video: Trims a video between two timestamps.
-   - start_time (number): Start time in seconds (inclusive).
+   - start_time (number): Start time in seconds.
    - end_time (number): End time in seconds (segment end time passed to ffmpeg -to).
 
 2. merge_videos: Merges a list of video files into one.
    - video_list (list of strings): Absolute or relative paths to the videos to merge, in order.
    - output_path (string): Path for the merged output file. Default: "videos/merged.mp4"
 
-When the user chooses trim_video, map natural language to start_time/end_time using the provided video_duration_seconds:
+When the user chooses trim_video, map natural language to start_time/end_time using video_duration_seconds:
 
-- "first N seconds" / "beginning N seconds" / "from the start for N seconds":
-  start_time = 0, end_time = min(N, video_duration_seconds)
-- "last N seconds" / "final N seconds" / "end of the video for N seconds":
-  start_time = max(0, video_duration_seconds - N), end_time = video_duration_seconds
-- "from A to B" / "between second A and second B":
-  start_time = A, end_time = B (must stay within 0..video_duration_seconds)
+- "first N seconds" / "beginning N seconds": start_time=0, end_time=min(N, video_duration_seconds)
+- "last N seconds" / "final N seconds": start_time=max(0, video_duration_seconds - N), end_time=video_duration_seconds
+- "from A to B" (seconds): start_time=A, end_time=B (stay within 0..video_duration_seconds)
 
 Analyze the user's instruction and decide which tool to use. If no tool is appropriate, set "tool" to null.
 
@@ -89,24 +89,24 @@ For no tool:
 }
 """
 
+    path = trim_input_path or DEFAULT_TRIM_INPUT
     extra = ""
-    if trim_input_path:
-        try:
-            duration = get_video_duration_seconds(trim_input_path)
-            extra = (
-                f"\nContext for trim_video (use these exact numbers when choosing trim_video):\n"
-                f"- trim_input_path: {trim_input_path}\n"
-                f"- video_duration_seconds: {duration:.6f}\n"
-            )
-        except (FileNotFoundError, subprocess.CalledProcessError, ValueError) as e:
-            extra = f"\nContext for trim_video: could not read duration for {trim_input_path}: {e}\n"
+    try:
+        duration = get_video_duration_seconds(path)
+        extra = (
+            f"\nContext for trim_video:\n"
+            f"- trim_input_path: {path}\n"
+            f"- video_duration_seconds: {duration:.6f}\n"
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError, ValueError) as e:
+        extra = f"\nContext for trim_video: could not read duration for {path}: {e}\n"
 
     full_prompt = system_prompt + extra + "\nInstruction: " + prompt
 
     response = requests.post(
         OLLAMA_URL,
         json={
-            "model": OLLAMA_MODEL,
+            "model": OLLAMA_MODEL_FIXED,
             "prompt": full_prompt,
             "stream": False
         },
@@ -123,8 +123,8 @@ For no tool:
     if data.get("error"):
         raise RuntimeError(
             f"Ollama error: {data['error']}\n"
-            "On small RAM hosts, use a smaller model or more RAM. "
-            "Example: ollama pull llama3.2:3b  then  OLLAMA_MODEL=llama3.2:3b python agent.py"
+            "llama3:latest needs substantial RAM; use a larger instance or run agent.py "
+            "with a smaller OLLAMA_MODEL on small hosts."
         )
 
     if "response" not in data:
@@ -145,13 +145,8 @@ For no tool:
         raise ValueError(f"Could not find JSON in response: {text}")
 
 
-def execute_agent_decision(
-    result,
-    trim_input_path="videos/1_feb5.mp4",
-    trim_output_path="videos/trimmed2.mp4",
-    merge_output_path="videos/merged.mp4",
-):
-    """Runs trim or merge (FFmpeg) from parsed LLM JSON and Python-supplied paths."""
+def execute_agent_decision(result):
+    """Runs trim or merge (FFmpeg) from parsed LLM JSON."""
     tool_name = result.get("tool")
 
     if tool_name == "trim_video":
@@ -160,8 +155,9 @@ def execute_agent_decision(
         end = params.get("end_time")
 
         if start is not None and end is not None:
+            trim_in = DEFAULT_TRIM_INPUT
             try:
-                dur = get_video_duration_seconds(trim_input_path)
+                dur = get_video_duration_seconds(trim_in)
                 s = float(start)
                 e = float(end)
                 if s < 0:
@@ -178,13 +174,10 @@ def execute_agent_decision(
                     e = min(dur, s + 0.001)
                 start, end = s, e
             except (FileNotFoundError, subprocess.CalledProcessError, ValueError) as exc:
-                print(f"Warning: could not clamp trim range to video duration: {exc}")
+                print(f"Warning: could not clamp trim range: {exc}")
 
-            print(
-                f"Agent decided to trim {trim_input_path} from {start}s to {end}s "
-                f"→ {trim_output_path}"
-            )
-            output = trim_video(trim_input_path, start, end, trim_output_path)
+            print(f"Agent decided to trim {trim_in} from {start}s to {end}s.")
+            output = trim_video(trim_in, start, end)
             return output
         else:
             return "Error: Missing parameters for trim_video."
@@ -192,10 +185,11 @@ def execute_agent_decision(
     elif tool_name == "merge_videos":
         params = result.get("parameters", {})
         video_list = params.get("video_list")
+        output_path = params.get("output_path", "videos/merged.mp4")
 
         if video_list and len(video_list) >= 2:
-            print(f"Agent decided to merge {len(video_list)} videos → {merge_output_path}")
-            output = merge_videos(video_list, merge_output_path)
+            print(f"Agent decided to merge {len(video_list)} videos → {output_path}")
+            output = merge_videos(video_list, output_path)
             return output
         else:
             return "Error: merge_videos requires at least 2 videos in video_list."
@@ -206,64 +200,26 @@ def execute_agent_decision(
         return f"Error: Unknown tool {tool_name} requested."
 
 
-def run_agent(
-    user_prompt,
-    trim_input_path="videos/1_feb5.mp4",
-    trim_output_path="videos/trimmed2.mp4",
-    merge_output_path="videos/merged.mp4",
-):
-    result = ask_llm(user_prompt, trim_input_path=trim_input_path)
-    return execute_agent_decision(
-        result,
-        trim_input_path=trim_input_path,
-        trim_output_path=trim_output_path,
-        merge_output_path=merge_output_path,
-    )
+def run_agent(user_prompt):
+    result = ask_llm(user_prompt, trim_input_path=DEFAULT_TRIM_INPUT)
+    return execute_agent_decision(result)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Voice-driven video editing agent.")
-    parser.add_argument(
-        "--audio-input",
-        default="audio/first4seconds.wav",
-        help='Audio file for speech-to-text (default: "audio/first4seconds.wav").',
-    )
-    parser.add_argument(
-        "--trim-input",
-        default="videos/1_feb5.mp4",
-        help='Input video path used for trim_video (default: "videos/1_feb5.mp4").',
-    )
-    parser.add_argument(
-        "--trim-output",
-        default="videos/trimmed2.mp4",
-        help='Output video path for trim_video (default: "videos/trimmed2.mp4").',
-    )
-    parser.add_argument(
-        "--merge-output",
-        default="videos/merged.mp4",
-        help='Output video path for merge_videos (default: "videos/merged.mp4").',
-    )
-    args = parser.parse_args()
-
-    print(f"Ollama model: {OLLAMA_MODEL}")
+    print(f"Ollama model (fixed): {OLLAMA_MODEL_FIXED}")
     t0 = time.perf_counter()
-    instruction = speech_to_text(args.audio_input)
+    instruction = speech_to_text("audio/first4seconds.wav")
     t_stt = time.perf_counter()
     print("User prompt:", instruction)
     print(f"Timing — speech-to-text: {t_stt - t0:.2f} s")
 
     t_llm_start = time.perf_counter()
-    llm_result = ask_llm(instruction, trim_input_path=args.trim_input)
+    llm_result = ask_llm(instruction, trim_input_path=DEFAULT_TRIM_INPUT)
     t_llm_end = time.perf_counter()
     print(f"Timing — LLM (JSON): {t_llm_end - t_llm_start:.2f} s")
 
     t_vid_start = time.perf_counter()
-    output = execute_agent_decision(
-        llm_result,
-        trim_input_path=args.trim_input,
-        trim_output_path=args.trim_output,
-        merge_output_path=args.merge_output,
-    )
+    output = execute_agent_decision(llm_result)
     t_vid_end = time.perf_counter()
     print(f"Timing — video output (FFmpeg): {t_vid_end - t_vid_start:.2f} s")
 
