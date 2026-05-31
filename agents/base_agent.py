@@ -1,7 +1,10 @@
 import json
 import re
+import time
+
 import requests
-from config import OLLAMA_MODEL, OLLAMA_BASE_URL
+
+from config import OLLAMA_BASE_URL, OLLAMA_MODEL
 
 
 class BaseAgent:
@@ -9,41 +12,96 @@ class BaseAgent:
         self.model = model or OLLAMA_MODEL
         self.name = self.__class__.__name__
 
+    # ------------------------------------------------------------------
+    # LLM call  — retries on timeout / server errors, fails fast on
+    # ConnectionError (Ollama not running is a config problem, not transient)
+    # ------------------------------------------------------------------
+
     def call_llm(self, prompt: str, system: str = None) -> str:
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
 
-        response = requests.post(
-            f"{OLLAMA_BASE_URL}/api/chat",
-            json={"model": self.model, "messages": messages, "stream": False},
-            timeout=120,
-        )
-        response.raise_for_status()
-        return response.json()["message"]["content"]
+        payload = {"model": self.model, "messages": messages, "stream": False}
+        last_err = None
+
+        for attempt in range(3):
+            try:
+                resp = requests.post(
+                    f"{OLLAMA_BASE_URL}/api/chat",
+                    json=payload,
+                    timeout=120,
+                )
+                resp.raise_for_status()
+                return resp.json()["message"]["content"]
+
+            except requests.exceptions.ConnectionError:
+                # Ollama is not running — no point retrying
+                raise RuntimeError(
+                    f"Cannot connect to Ollama at {OLLAMA_BASE_URL}. "
+                    "Run 'ollama serve' first."
+                )
+            except (requests.exceptions.Timeout, requests.exceptions.HTTPError) as e:
+                last_err = e
+                if attempt < 2:
+                    time.sleep(3 * (attempt + 1))   # 3s, then 6s
+            except Exception as e:
+                last_err = e
+                if attempt < 2:
+                    time.sleep(2)
+
+        raise RuntimeError(f"LLM call failed after 3 attempts: {last_err}")
+
+    # ------------------------------------------------------------------
+    # JSON extraction  — handles fenced blocks, bare objects, and common
+    # LLM formatting errors (trailing commas, single-quoted strings)
+    # ------------------------------------------------------------------
 
     def extract_json(self, text: str) -> dict:
-        # Try fenced code block first, then bare JSON object
+        # 1. Fenced code blocks  ```json ... ``` or ``` ... ```
         for pattern in [r"```json\s*([\s\S]*?)\s*```", r"```\s*([\s\S]*?)\s*```"]:
-            match = re.search(pattern, text, re.DOTALL)
-            if match:
-                try:
-                    return json.loads(match.group(1))
-                except json.JSONDecodeError:
-                    pass
+            m = re.search(pattern, text, re.DOTALL)
+            if m:
+                parsed = self._try_parse(m.group(1).strip())
+                if parsed is not None:
+                    return parsed
 
-        # Find the outermost JSON object or array
-        for start_char, end_char in [('{', '}'), ('[', ']')]:
-            start = text.find(start_char)
-            end = text.rfind(end_char)
-            if start != -1 and end != -1 and end > start:
-                try:
-                    return json.loads(text[start:end + 1])
-                except json.JSONDecodeError:
-                    pass
+        # 2. Outermost { } or [ ]  (most common bare-object response)
+        for open_c, close_c in [('{', '}'), ('[', ']')]:
+            start = text.find(open_c)
+            end = text.rfind(close_c)
+            if start != -1 and end > start:
+                parsed = self._try_parse(text[start:end + 1])
+                if parsed is not None:
+                    return parsed
 
-        raise ValueError(f"No valid JSON found in response:\n{text[:300]}")
+        raise ValueError(f"No valid JSON found in LLM response:\n{text[:400]}")
+
+    def _try_parse(self, text: str):
+        """
+        Try json.loads with progressive repairs:
+          1. As-is
+          2. Remove trailing commas before } or ]
+          3. Replace smart/curly quotes with straight ones
+        Returns parsed object or None.
+        """
+        candidates = [
+            text,
+            re.sub(r",\s*([}\]])", r"\1", text),                         # trailing commas
+            re.sub(r",\s*([}\]])", r"\1", text).replace("'", '"'),        # single quotes
+            text.replace("“", '"').replace("”", '"'),            # curly quotes
+        ]
+        for candidate in candidates:
+            try:
+                return json.loads(candidate)
+            except (json.JSONDecodeError, ValueError):
+                continue
+        return None
+
+    # ------------------------------------------------------------------
+    # Subclass interface
+    # ------------------------------------------------------------------
 
     def run(self, *args, **kwargs):
         raise NotImplementedError(f"{self.name}.run() not implemented")

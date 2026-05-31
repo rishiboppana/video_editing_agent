@@ -21,7 +21,7 @@ class ExplainerAgent(BaseAgent):
         "Always respond with ONLY a valid JSON object — no prose, no markdown fences."
     )
 
-    def run(self, transcript: dict, feedback: str = "") -> dict:
+    def run(self, transcript: dict, video_type: str = None, feedback: str = "") -> dict:
         audio_segs = transcript.get("segments", [])
         visual_segs = transcript.get("visual_segments", [])
 
@@ -72,10 +72,16 @@ class ExplainerAgent(BaseAgent):
 
         feedback_block = f"\nPREVIOUS ATTEMPT FEEDBACK:\n{feedback}\n" if feedback else ""
 
+        video_type_block = (
+            f"\nVideo type (user-specified): {video_type}\n"
+            f"Interpret and score all segments through the lens of this video type.\n"
+            if video_type else ""
+        )
+
         prompt = f"""Analyze this video's synchronized speech and visual content.
 Each SPEECH line shows what was said and (when available) what was visually on screen at that moment.
 Each VISUAL line shows a scene with no concurrent speech.
-
+{video_type_block}
 Return a JSON object with:
 - "summary": 2-3 sentences synthesizing what was said AND what was seen
 - "topics": list of main topics (strings)
@@ -91,17 +97,35 @@ Return a JSON object with:
     - "reason": one sentence on why this score
 
 Video overview:
-  Duration : {transcript.get('duration', '?')}s
-  Speech   : {len(audio_segs)} segments
-  Visual   : {len(visual_segs)} scenes
+  Duration   : {transcript.get('duration', '?')}s
+  Speech     : {len(audio_segs)} segments
+  Visual     : {len(visual_segs)} scenes
+  Video type : {video_type or 'not specified'}
 
 Synchronized timeline:
 {content_block}
 {feedback_block}
 Return ONLY a JSON object."""
 
+        # Guard: if there is truly nothing to analyse, return a minimal result
+        # rather than sending an empty prompt to the LLM.
+        if not content_block.strip():
+            return {
+                "summary": "No speech or visual content could be extracted from this video.",
+                "topics": [],
+                "tone": "unknown",
+                "pacing": "unknown",
+                "key_moments": [],
+                "segments": [],
+                "duration": transcript.get("duration", 0),
+            }
+
         response = self.call_llm(prompt, system=self.SYSTEM)
         result = self.extract_json(response)
+
+        # Always carry duration forward so the highlighter can clamp timestamps
+        result["duration"] = transcript.get("duration", 0)
+
         result["segments"] = self._merge_all_segments(
             audio_segs, visual_segs, result.get("segments", [])
         )

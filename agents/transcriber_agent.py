@@ -21,7 +21,8 @@ from config import (
 
 logger = logging.getLogger("orchestrator")
 
-SCENE_THRESHOLD = float(os.getenv("SCENE_THRESHOLD", "0.25"))
+# Lower threshold = more sensitive to cuts (0.15 catches soft transitions too)
+SCENE_THRESHOLD = float(os.getenv("SCENE_THRESHOLD", "0.15"))
 
 
 def _best_device() -> str:
@@ -64,6 +65,27 @@ class TranscriberAgent(BaseAgent):
             self._whisper = whisper.load_model(WHISPER_MODEL, device=self._device)
         return self._whisper
 
+    def _transcribe(self, audio_path: str) -> dict:
+        """
+        Transcribe with automatic CPU fallback.
+
+        MPS on Apple Silicon supports most Whisper operations but fails on
+        sparse tensor ops (SparseMPS) for some audio inputs.  Rather than
+        crashing and burning all 3 orchestrator retries, we catch the backend
+        error on the first occurrence, reload Whisper on CPU, and continue.
+        """
+        try:
+            return self.whisper.transcribe(audio_path)
+        except RuntimeError as e:
+            if "MPS" in str(e) or "Sparse" in str(e):
+                logger.warning(
+                    f"  [TranscriberAgent] MPS backend error — reloading Whisper on CPU"
+                )
+                self._device = "cpu"
+                self._whisper = whisper.load_model(WHISPER_MODEL, device="cpu")
+                return self._whisper.transcribe(audio_path)
+            raise
+
     # ------------------------------------------------------------------
     # Public entry point
     # ------------------------------------------------------------------
@@ -80,7 +102,7 @@ class TranscriberAgent(BaseAgent):
 
         audio_path = self._extract_audio(video_path)
         try:
-            result = self.whisper.transcribe(audio_path)
+            result = self._transcribe(audio_path)
             audio_segments = [
                 {
                     "id": i,
@@ -129,43 +151,41 @@ class TranscriberAgent(BaseAgent):
         return self._adaptive_chunks(duration)
 
     def _detect_with_ffmpeg(self, video_path: str, duration: float) -> list:
-        """Write scene-change metadata to a temp file via ffmpeg select filter."""
-        meta_file = tempfile.mktemp(suffix="_scenes.txt")
-        try:
-            cmd = [
-                FFMPEG_PATH, "-y", "-i", video_path,
-                "-vf", f"select='gt(scene,{SCENE_THRESHOLD})',metadata=mode=print:file={meta_file}",
-                "-vsync", "0", "-an", "-f", "null", "-",
-            ]
-            subprocess.run(cmd, capture_output=True, text=True, timeout=300, check=False)
+        """
+        Detect scene cuts using ffmpeg's select + showinfo filter pipeline.
 
-            scene_times = [0.0]
-            if os.path.exists(meta_file):
-                with open(meta_file) as f:
-                    content = f.read()
-                for line in content.splitlines():
-                    # Lines look like: "frame:12  pts:12012  pts_time:0.400400"
-                    if "pts_time:" in line:
-                        m = re.search(r"pts_time:(\d+\.?\d*)", line)
-                        if m:
-                            t = float(m.group(1))
-                            if t > 0.2:
-                                scene_times.append(t)
+        Why showinfo instead of metadata=mode=print:file=?
+        The metadata filter writes 'lavfi.scene_score=X' entries but does NOT
+        include pts_time in that file — the pts_time only appears in showinfo's
+        stderr output.  showinfo reliably produces lines like:
+          [Parsed_showinfo_1 @ 0x...] n:5 pts:5005 pts_time:0.167 ...
+        which we parse to get exact scene-cut timestamps.
+        """
+        cmd = [
+            FFMPEG_PATH, "-i", video_path,
+            "-vf", f"select='gt(scene,{SCENE_THRESHOLD})',showinfo",
+            "-vsync", "0", "-an", "-f", "null", "-",
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, check=False)
 
-            points = sorted(set(scene_times + [duration]))
-            segments = []
-            for i in range(len(points) - 1):
-                s, e = points[i], points[i + 1]
-                if e - s >= 1.0:
-                    segments.append({
-                        "id": f"v{i}",
-                        "start": round(s, 2),
-                        "end": round(e, 2),
-                    })
-            return segments
-        finally:
-            if os.path.exists(meta_file):
-                os.remove(meta_file)
+        scene_times = [0.0]
+        for line in result.stderr.splitlines():
+            # showinfo lines contain both "pts_time:" and "iskey:" — use iskey
+            # as an anchor so we don't accidentally match other ffmpeg log lines
+            if "pts_time:" in line and "iskey:" in line:
+                m = re.search(r"pts_time:(\d+\.?\d*)", line)
+                if m:
+                    t = float(m.group(1))
+                    if t > 0.1:          # skip frame 0 / near-zero timestamps
+                        scene_times.append(t)
+
+        points = sorted(set(scene_times + [duration]))
+        segments = []
+        for i in range(len(points) - 1):
+            s, e = points[i], points[i + 1]
+            if e - s >= 1.0:
+                segments.append({"id": f"v{i}", "start": round(s, 2), "end": round(e, 2)})
+        return segments
 
     def _adaptive_chunks(self, duration: float) -> list:
         """Divide the video into ~8 equal chunks when scene detection finds nothing."""
@@ -291,18 +311,22 @@ class TranscriberAgent(BaseAgent):
 
         if len(images_b64) == 1:
             prompt = (
-                f"This frame is from a video at {sample_times[0]}s "
-                f"(scene: {start}s–{end}s). "
-                "In 1–2 sentences describe: who/what is on screen, "
-                "what action is happening, and the setting or mood."
+                f"This frame is from a video at {sample_times[0]}s (scene: {start}s–{end}s). "
+                "Answer these 4 points in 1 sentence each:\n"
+                "1. CONTENT: What is happening and who/what is on screen?\n"
+                "2. EMOTION: What emotions are visible (e.g. joy, sadness, excitement, anger, neutral)?\n"
+                "3. ENERGY: What is the energy level — low / medium / high?\n"
+                "4. CROWD: Is there any audience or crowd reaction visible?"
             )
         else:
             times_str = ", ".join(f"{t}s" for t in sample_times)
             prompt = (
-                f"These {len(images_b64)} frames are sampled at {times_str} "
-                f"from a video segment {start}s–{end}s. "
-                "In 2–3 sentences describe: what is happening throughout this segment, "
-                "who/what is on screen, how the scene changes, and the overall mood."
+                f"These {len(images_b64)} frames are from {start}s–{end}s (sampled at {times_str}). "
+                "Answer these 4 points in 1–2 sentences each:\n"
+                "1. CONTENT: What is happening and how does it change across the frames?\n"
+                "2. EMOTION: What emotions are visible throughout this segment?\n"
+                "3. ENERGY: Overall energy level — low / medium / high — and does it change?\n"
+                "4. CROWD: Any audience, crowd, or group reaction visible?"
             )
 
         response = requests.post(

@@ -41,10 +41,21 @@ class OrchestratorAgent(BaseAgent):
     # Public entry point
     # ------------------------------------------------------------------
 
-    def run(self, video_path: str, output_path: str, max_duration: int = None) -> dict:
+    def run(
+        self,
+        video_path: str,
+        output_path: str,
+        max_duration: int = None,
+        style: str = None,
+        video_type: str = None,
+    ) -> dict:
         max_dur = max_duration or MAX_HIGHLIGHT_DURATION
         logger.info(DIVIDER)
         logger.info(f"ORCHESTRATOR  video={video_path}  out={output_path}  max={max_dur}s")
+        if video_type:
+            logger.info(f"  video_type : {video_type}")
+        if style:
+            logger.info(f"  style      : {style}")
         logger.info(DIVIDER)
 
         # ── Step 1: Transcription ───────────────────────────────────────
@@ -63,10 +74,10 @@ class OrchestratorAgent(BaseAgent):
         logger.info("\n[STEP 2/4]  EXPLANATION")
         explanation = self._run_with_retry(
             agent=self.explainer,
-            run_kwargs={"transcript": transcript},
+            run_kwargs={"transcript": transcript, "video_type": video_type},
             review_context=(
-                f"Transcript has {len(transcript['segments'])} segments. "
-                f"Expecting a summary, topic list, tone, and per-segment importance scores."
+                f"Analyzing {len(transcript['segments'])} segments "
+                f"of a '{video_type or 'unknown'}' video."
             ),
         )
         logger.info(f"  → summary: {explanation.get('summary', '')[:160]}")
@@ -77,12 +88,16 @@ class OrchestratorAgent(BaseAgent):
         logger.info("\n[STEP 3/4]  HIGHLIGHT SELECTION")
         highlights_data = self._run_with_retry(
             agent=self.highlighter,
-            run_kwargs={"explained_data": explanation, "max_duration": max_dur},
+            run_kwargs={
+                "explained_data": explanation,
+                "max_duration": max_dur,
+                "style": style,
+            },
             validate_kwargs={"max_duration": max_dur},
             review_context=(
                 f"Selecting highlights from {len(explanation['segments'])} segments. "
-                f"Max allowed duration is {max_dur}s. "
-                f"Video summary: {explanation.get('summary', '')[:200]}"
+                f"Max {max_dur}s. Style: '{style or 'none'}'. "
+                f"Summary: {explanation.get('summary', '')[:200]}"
             ),
         )
         logger.info(
@@ -92,8 +107,6 @@ class OrchestratorAgent(BaseAgent):
         logger.info(f"  → narrative: {highlights_data.get('narrative', '')[:160]}")
 
         # ── Step 4: Video editing ───────────────────────────────────────
-        # Sort highlights chronologically so clips are joined in the order
-        # they appear in the original video, regardless of importance rank.
         ordered_highlights = sorted(
             highlights_data["highlights"], key=lambda h: h["start"]
         )
@@ -107,7 +120,7 @@ class OrchestratorAgent(BaseAgent):
                 "output_path": output_path,
             },
             review_context=(
-                f"Cutting {len(highlights_data['highlights'])} clips and joining into {output_path}."
+                f"Cutting {len(ordered_highlights)} clips and joining into {output_path}."
             ),
         )
         logger.info(f"  → output  : {edit_result['output_path']}")
@@ -121,10 +134,12 @@ class OrchestratorAgent(BaseAgent):
             "status": "success",
             "output_path": edit_result["output_path"],
             "duration": edit_result["duration"],
-            "clips_count": len(highlights_data["highlights"]),
+            "clips_count": len(ordered_highlights),
             "summary": explanation.get("summary"),
             "topics": explanation.get("topics", []),
             "tone": explanation.get("tone"),
+            "style": style,
+            "video_type": video_type,
             "narrative": highlights_data.get("narrative"),
             "pipeline": {
                 "transcript": transcript,

@@ -11,52 +11,74 @@ class HighlighterAgent(BaseAgent):
         "Always respond with ONLY a valid JSON object — no prose, no markdown fences."
     )
 
-    def run(self, explained_data: dict, max_duration: int = None, feedback: str = "") -> dict:
+    def run(
+        self,
+        explained_data: dict,
+        max_duration: int = None,
+        style: str = None,
+        feedback: str = "",
+    ) -> dict:
         max_dur = max_duration or MAX_HIGHLIGHT_DURATION
+        video_duration = float(explained_data.get("duration", 1e9))
 
+        # Cast importance to float safely so :.2f never crashes on string values
         segments_text = "\n".join(
-            f"[id={s['id']} | {s['start']}s-{s['end']}s | importance={s['importance']:.2f}]: {s.get('text', '[Visual]')}"
-            for s in explained_data["segments"]
+            f"[id={s['id']} | {s['start']}s-{s['end']}s | importance={_safe_float(s.get('importance', 0)):.2f}]: "
+            f"{s.get('text', '[Visual]')[:120]}"
+            for s in explained_data.get("segments", [])
         )
 
-        feedback_block = ""
-        if feedback:
-            feedback_block = f"\n\nPREVIOUS ATTEMPT FEEDBACK (fix these issues):\n{feedback}\n"
+        style_block = (
+            f"\nUSER STYLE PREFERENCE: \"{style}\"\n"
+            "Let this preference guide which segments you pick and why. "
+            "Interpret it freely — match the mood, pacing, and focus the user described.\n"
+            if style else ""
+        )
+
+        feedback_block = (
+            f"\nPREVIOUS ATTEMPT FEEDBACK (fix these issues):\n{feedback}\n"
+            if feedback else ""
+        )
 
         prompt = f"""Select the best highlights to create a {max_dur}-second reel.
-TARGET DURATION: {max_dur} seconds. (Fill at least {int(max_dur * 0.8)}s)
+TARGET: fill at least {int(max_dur * 0.8)}s and no more than {max_dur}s.
+VIDEO DURATION: {video_duration}s — do NOT use start/end times beyond this.
 
-Video summary: {explained_data['summary']}
-Tone: {explained_data.get('tone', 'unknown')}
-Pacing: {explained_data.get('pacing', 'unknown')}
-
-Available segments (Audio and Visual):
+Video summary: {explained_data.get('summary', 'unknown')}
+Tone   : {explained_data.get('tone', 'unknown')}
+Pacing : {explained_data.get('pacing', 'unknown')}
+{style_block}
+Available segments:
 {segments_text}
 
 Rules:
-1. SELECT ENOUGH SEGMENTS TO FILL {max_dur} SECONDS (or as close as possible).
-2. If total duration of high-importance segments is less than {max_dur}s, you MUST select lower-importance segments to fill the time.
-3. PICK AT LEAST ONE SEGMENT FROM EACH THIRD OF THE VIDEO (Beginning, Middle, End).
-4. If this is a visual-centric video (few audio segments), prioritize visually distinct [VISUAL] segments.
-5. Do not exceed {max_dur}s.
+1. Only use segment ids, start, and end times exactly as listed above.
+2. start and end MUST be within 0–{video_duration}s.
+3. Pick segments from the beginning, middle, AND end of the video.
+4. If a style preference is given, it overrides importance scores.
+5. Total duration must be between {int(max_dur * 0.8)}s and {max_dur}s.
 {feedback_block}
 Return a JSON object with:
 - "highlights": list of selected segments, each with:
-    - "id": the original segment id
+    - "id": the original segment id (copy exactly from the list above)
     - "start": start time in seconds
     - "end": end time in seconds
-    - "reason": why this segment contributes to the {max_dur}s target
-- "total_duration": sum of durations (float, in seconds)
-- "narrative": summary of the highlight reel narrative
+    - "reason": one sentence on why this segment was chosen
+- "total_duration": sum of durations in seconds
+- "narrative": 1-2 sentences describing what the highlight reel shows
 
 Return ONLY a JSON object."""
 
         response = self.call_llm(prompt, system=self.SYSTEM)
         result = self.extract_json(response)
 
-        # Recalculate total_duration from actual segment times (don't trust LLM math)
-        highlights = result.get("highlights", [])
-        total = sum(h["end"] - h["start"] for h in highlights)
+        # Clamp any hallucinated timestamps to actual video bounds
+        result["highlights"] = _clamp_highlights(
+            result.get("highlights", []), video_duration
+        )
+
+        # Recalculate total_duration — never trust LLM arithmetic
+        total = sum(h["end"] - h["start"] for h in result["highlights"])
         result["total_duration"] = round(total, 2)
 
         return result
@@ -72,11 +94,42 @@ Return ONLY a JSON object."""
         for h in output["highlights"]:
             if not all(k in h for k in ("start", "end")):
                 return False, f"Highlight missing start/end: {h}"
-            if h["end"] <= h["start"]:
-                return False, f"Invalid time range [{h['start']}, {h['end']}]"
+            try:
+                start, end = float(h["start"]), float(h["end"])
+            except (TypeError, ValueError):
+                return False, f"Non-numeric start/end in highlight: {h}"
+            if end <= start:
+                return False, f"Invalid time range [{start}, {end}]"
+            if start < 0:
+                return False, f"Negative start time: {start}"
 
-        total = sum(h["end"] - h["start"] for h in output["highlights"])
+        total = sum(float(h["end"]) - float(h["start"]) for h in output["highlights"])
         if total > max_dur:
-            return False, f"Total duration {total:.1f}s exceeds max {max_dur}s"
+            return False, f"Total {total:.1f}s exceeds max {max_dur}s"
 
         return True, f"{len(output['highlights'])} highlights, {total:.1f}s total"
+
+
+# ------------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------------
+
+def _safe_float(value, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _clamp_highlights(highlights: list, video_duration: float) -> list:
+    """Clamp start/end to [0, video_duration] and drop zero-length clips."""
+    clamped = []
+    for h in highlights:
+        try:
+            start = max(0.0, float(h["start"]))
+            end = min(float(h["end"]), video_duration)
+        except (TypeError, ValueError):
+            continue
+        if end - start >= 0.5:
+            clamped.append({**h, "start": round(start, 2), "end": round(end, 2)})
+    return clamped

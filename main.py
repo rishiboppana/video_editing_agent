@@ -46,6 +46,27 @@ def parse_args():
         help=f"Max highlight duration in seconds (default: {MAX_HIGHLIGHT_DURATION})",
     )
     parser.add_argument(
+        "--style",
+        default=None,
+        metavar="TEXT",
+        help=(
+            'Free-text style preference passed directly to the highlight selector. '
+            'Examples: "make it cinematic and emotional" | '
+            '"fast-paced hype reel with crowd reactions" | '
+            '"educational summary covering all key points"'
+        ),
+    )
+    parser.add_argument(
+        "--video-type",
+        default=None,
+        metavar="TEXT",
+        help=(
+            'Free-text description of what kind of video this is. '
+            'Examples: "birthday party" | "university lecture" | '
+            '"live concert" | "product demo" | "sports match"'
+        ),
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="Print the full result as JSON (suppresses progress logs)",
@@ -73,6 +94,8 @@ def main():
             video_path=args.video,
             output_path=args.output,
             max_duration=args.duration,
+            style=args.style,
+            video_type=args.video_type,
         )
 
         if args.json:
