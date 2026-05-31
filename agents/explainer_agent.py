@@ -61,7 +61,12 @@ class ExplainerAgent(BaseAgent):
                 for s_start, s_end in speech_times
             )
             if not has_speech:
-                desc = v.get("description", "[no description]")
+                desc = v.get("description", "")
+                # Skip placeholder descriptions — they carry no real information
+                # and confuse the LLM (e.g. "[vision disabled]" gets interpreted
+                # as a topic about disability).
+                if not desc or any(p in desc for p in ("[vision", "[brief", "[visual desc")):
+                    continue
                 all_entries.append({
                     "start": float(v["start"]),
                     "label": f"[VISUAL {v['start']}s-{v['end']}s]: {desc}",
@@ -82,6 +87,9 @@ class ExplainerAgent(BaseAgent):
 Each SPEECH line shows what was said and (when available) what was visually on screen at that moment.
 Each VISUAL line shows a scene with no concurrent speech.
 {video_type_block}
+IMPORTANT: All "start" and "end" values must be plain numbers only (e.g. 4.5 not "4.5s").
+Importance must be a float between 0.0 and 1.0 (e.g. 0.8 not "high").
+
 Return a JSON object with:
 - "summary": 2-3 sentences synthesizing what was said AND what was seen
 - "topics": list of main topics (strings)
