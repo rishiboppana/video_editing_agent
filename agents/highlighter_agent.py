@@ -81,6 +81,11 @@ Return ONLY a JSON object."""
         response = self.call_llm(prompt, system=self.SYSTEM)
         result = self.extract_json(response)
 
+        # LLM sometimes returns the highlights array directly instead of
+        # wrapping it in {"highlights": [...]} — normalise either form.
+        if isinstance(result, list):
+            result = {"highlights": result}
+
         highlights = result.get("highlights", [])
 
         # Clamp to video bounds
