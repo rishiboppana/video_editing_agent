@@ -139,15 +139,12 @@ Return ONLY a JSON object."""
             return False, "summary is empty"
         if not output["segments"]:
             return False, "segments list is empty"
+
+        # Auto-heal bad importance values rather than rejecting the whole output.
+        # The LLM sometimes returns "high"/"low"/null — normalise them in place.
         for seg in output["segments"]:
-            if "importance" not in seg:
-                return False, f"Segment {seg.get('id')} missing importance"
-            try:
-                score = float(seg["importance"])
-            except (TypeError, ValueError):
-                return False, f"Segment {seg.get('id')} has non-numeric importance"
-            if not 0.0 <= score <= 1.0:
-                return False, f"Segment {seg.get('id')} importance {score} out of [0,1]"
+            seg["importance"] = _normalise_importance(seg.get("importance"))
+
         return True, f"{len(output['segments'])} segments analyzed"
 
     def _merge_all_segments(self, audio: list, visual: list, scored: list) -> list:
@@ -156,9 +153,12 @@ Return ONLY a JSON object."""
 
         for seg in audio:
             key = str(seg["id"])
-            merged.append(
-                scored_map.get(key, {**seg, "importance": 0.4, "reason": "Not individually analyzed"})
-            )
+            if key in scored_map:
+                entry = dict(scored_map[key])
+                entry["importance"] = _normalise_importance(entry.get("importance"))
+                merged.append(entry)
+            else:
+                merged.append({**seg, "importance": 0.4, "reason": "Not individually analyzed"})
 
         audio_duration = sum(s["end"] - s["start"] for s in audio)
         is_sparse_audio = audio_duration < 5.0
@@ -166,9 +166,10 @@ Return ONLY a JSON object."""
         for seg in visual:
             key = str(seg["id"])
             if key in scored_map:
-                scored_seg = scored_map[key]
-                if is_sparse_audio or float(scored_seg.get("importance", 0)) >= 0.5:
-                    merged.append(scored_seg)
+                entry = dict(scored_map[key])
+                entry["importance"] = _normalise_importance(entry.get("importance"))
+                if is_sparse_audio or entry["importance"] >= 0.5:
+                    merged.append(entry)
             elif is_sparse_audio:
                 desc = seg.get("description", "[visual scene]")
                 merged.append({
@@ -179,3 +180,30 @@ Return ONLY a JSON object."""
                 })
 
         return sorted(merged, key=lambda x: float(x.get("start", 0)))
+
+
+# ------------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------------
+
+_TEXT_TO_IMPORTANCE = {
+    "low": 0.2, "medium": 0.5, "moderate": 0.5,
+    "high": 0.8, "very high": 0.95, "critical": 1.0,
+}
+
+def _normalise_importance(value) -> float:
+    """
+    Convert whatever the LLM returned for importance into a valid float 0–1.
+    Handles: float, int, numeric string, text labels, None.
+    """
+    if value is None:
+        return 0.4
+    if isinstance(value, (int, float)):
+        return max(0.0, min(1.0, float(value)))
+    s = str(value).strip().lower()
+    if s in _TEXT_TO_IMPORTANCE:
+        return _TEXT_TO_IMPORTANCE[s]
+    try:
+        return max(0.0, min(1.0, float(s)))
+    except ValueError:
+        return 0.4
