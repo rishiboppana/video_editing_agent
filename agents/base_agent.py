@@ -96,18 +96,18 @@ class BaseAgent:
         raise ValueError(f"No valid JSON found in LLM response:\n{text[:400]}")
 
     def _try_parse(self, text: str):
-        “””Try json.loads with progressive repairs. Returns parsed object or None.”””
+        """Try json.loads with progressive repairs. Returns parsed object or None."""
         # Pre-process: strip unit suffixes on bare numeric values (e.g. 4.5s → 4.5)
-        # LLMs frequently write timestamps as “4.5s” which is not valid JSON.
+        # LLMs frequently write timestamps as "4.5s" which is not valid JSON.
         cleaned = re.sub(r'(?<=[:\[,\s])(\d+\.?\d*)\s*s(?=\s*[,\]\}])', r'\1', text)
 
-        base = re.sub(r”,\s*([}\]])”, r”\1”, cleaned)  # strip trailing commas
-        # Replace left/right curly double-quotes (“ / ”) with straight quotes
+        base = re.sub(r",\s*([}\]])", r"\1", cleaned)  # strip trailing commas
+        # Replace left/right curly double-quotes (" / ") with straight quotes
         candidates = [
             text,
             cleaned,
             base,
-            base.replace(“'”, '”'),   # single -> double quotes
+            base.replace("'", '"'),   # single -> double quotes
         ]
         for candidate in candidates:
             try:
