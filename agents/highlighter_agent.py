@@ -3,11 +3,16 @@ from config import MAX_HIGHLIGHT_DURATION
 
 
 class HighlighterAgent(BaseAgent):
-    """Uses Ollama to select the best highlight segments that form a coherent reel."""
+    """
+    Selects the best highlight segments by reasoning about content, emotion,
+    and energy — not just filling a time target mechanically.
+    """
 
     SYSTEM = (
-        "You are an expert video editor specializing in highlight reels. "
-        "You select segments that are engaging, meaningful, and tell a complete story. "
+        "You are a professional video editor. "
+        "You watch videos and find the moments that best match what the viewer asked for. "
+        "You think about what is actually happening in each scene — the emotion, the energy, "
+        "the visual action — and pick accordingly. "
         "Always respond with ONLY a valid JSON object — no prose, no markdown fences."
     )
 
@@ -21,64 +26,71 @@ class HighlighterAgent(BaseAgent):
         max_dur = max_duration or MAX_HIGHLIGHT_DURATION
         video_duration = float(explained_data.get("duration", 1e9))
 
-        # Cast importance to float safely so :.2f never crashes on string values
-        segments_text = "\n".join(
-            f"[id={s['id']} | {s['start']}s-{s['end']}s | importance={_safe_float(s.get('importance', 0)):.2f}]: "
-            f"{s.get('text', '[Visual]')[:120]}"
-            for s in explained_data.get("segments", [])
-        )
+        # Build a rich per-segment description so the LLM sees full context:
+        # importance score, the reason it was scored, and the actual content
+        segments_text = _build_segments_text(explained_data.get("segments", []))
 
         style_block = (
-            f"\nUSER STYLE PREFERENCE: \"{style}\"\n"
-            "Let this preference guide which segments you pick and why. "
-            "Interpret it freely — match the mood, pacing, and focus the user described.\n"
-            if style else ""
+            f"\nWHAT THE USER WANTS: \"{style}\"\n"
+            "This is your PRIMARY goal. Read every segment below and find the ones that "
+            "best match this. Forget structural rules — find the RIGHT moments.\n"
+            if style
+            else "\nNo style specified — pick the highest-importance moments that together tell a coherent story.\n"
         )
 
         feedback_block = (
-            f"\nPREVIOUS ATTEMPT FEEDBACK (fix these issues):\n{feedback}\n"
+            f"\nPREVIOUS ATTEMPT FEEDBACK — fix these specific issues:\n{feedback}\n"
             if feedback else ""
         )
 
-        prompt = f"""Select the best highlights to create a {max_dur}-second reel.
-TARGET: fill at least {int(max_dur * 0.8)}s and no more than {max_dur}s.
-VIDEO DURATION: {video_duration}s — do NOT use start/end times beyond this.
+        prompt = f"""You are selecting clips for a {max_dur}-second highlight reel.
 
-Video summary: {explained_data.get('summary', 'unknown')}
-Tone   : {explained_data.get('tone', 'unknown')}
-Pacing : {explained_data.get('pacing', 'unknown')}
+VIDEO INFO:
+  Duration : {video_duration}s
+  Summary  : {explained_data.get('summary', 'unknown')}
+  Tone     : {explained_data.get('tone', 'unknown')}
+  Pacing   : {explained_data.get('pacing', 'unknown')}
 {style_block}
-Available segments:
+AVAILABLE SEGMENTS (read every one carefully before deciding):
 {segments_text}
 
-Rules:
-1. Only use segment ids, start, and end times exactly as listed above.
-2. start and end MUST be within 0–{video_duration}s.
-3. Pick segments from the beginning, middle, AND end of the video.
-4. If a style preference is given, it overrides importance scores.
-5. Total duration must be between {int(max_dur * 0.8)}s and {max_dur}s.
+SELECTION RULES:
+1. CONTENT FIRST: Pick segments where what is happening matches what the user asked for.
+   Read the CONTENT and REASON fields — they tell you what is in the scene.
+2. DO NOT CUT MID-SENTENCE: If a speech segment is selected, use its full start-to-end
+   time. Never trim a spoken thought mid-way.
+3. MERGE ADJACENT CLIPS: If two consecutive segments you want are within 1 second of each
+   other, merge them into one continuous clip (use the earlier start and later end).
+4. STYLE BEATS IMPORTANCE: A segment with importance=0.4 that perfectly matches the style
+   is better than a 0.9 segment that does not match.
+5. DURATION CONSTRAINT: Total must not exceed {max_dur}s. Minimum is {int(max_dur * 0.7)}s.
+   If you cannot fill the minimum with matching content, extend your best segments slightly.
+6. All start/end values must be plain numbers within 0–{video_duration}s.
 {feedback_block}
 Return a JSON object with:
-- "highlights": list of selected segments, each with:
-    - "id": the original segment id (copy exactly from the list above)
-    - "start": start time in seconds
-    - "end": end time in seconds
-    - "reason": one sentence on why this segment was chosen
-- "total_duration": sum of durations in seconds
-- "narrative": 1-2 sentences describing what the highlight reel shows
+- "highlights": list of selected clips, each with:
+    - "id": the original segment id (or "merged" for merged clips)
+    - "start": start time in seconds (plain number)
+    - "end": end time in seconds (plain number)
+    - "reason": one sentence explaining exactly WHY this clip matches the request
+- "total_duration": sum of clip durations (plain number)
+- "narrative": 1-2 sentences on what the highlight reel shows and why it matches the request
 
 Return ONLY a JSON object."""
 
         response = self.call_llm(prompt, system=self.SYSTEM)
         result = self.extract_json(response)
 
-        # Clamp any hallucinated timestamps to actual video bounds
-        result["highlights"] = _clamp_highlights(
-            result.get("highlights", []), video_duration
-        )
+        highlights = result.get("highlights", [])
 
-        # Recalculate total_duration — never trust LLM arithmetic
-        total = sum(h["end"] - h["start"] for h in result["highlights"])
+        # Clamp to video bounds
+        highlights = _clamp_highlights(highlights, video_duration)
+
+        # Merge clips that are <= 1s apart — avoids micro-cuts
+        highlights = _merge_adjacent(highlights, gap_threshold=1.0)
+
+        total = sum(h["end"] - h["start"] for h in highlights)
+        result["highlights"] = highlights
         result["total_duration"] = round(total, 2)
 
         return result
@@ -97,7 +109,7 @@ Return ONLY a JSON object."""
             try:
                 start, end = float(h["start"]), float(h["end"])
             except (TypeError, ValueError):
-                return False, f"Non-numeric start/end in highlight: {h}"
+                return False, f"Non-numeric start/end: {h}"
             if end <= start:
                 return False, f"Invalid time range [{start}, {end}]"
             if start < 0:
@@ -114,6 +126,33 @@ Return ONLY a JSON object."""
 # Helpers
 # ------------------------------------------------------------------
 
+def _build_segments_text(segments: list) -> str:
+    """
+    Build a rich text block so the LLM sees full content context per segment,
+    not just an importance number.
+    """
+    lines = []
+    for s in segments:
+        imp = _safe_float(s.get("importance", 0))
+        sid = s.get("id", "?")
+        start = s.get("start", 0)
+        end = s.get("end", 0)
+        text = s.get("text", "[no text]")
+        reason = s.get("reason", "")
+
+        # Summarise the content: trim long descriptions but keep key signals
+        content = str(text).strip()[:200]
+
+        line = (
+            f"[id={sid} | {start}s-{end}s | importance={imp:.2f}]\n"
+            f"  CONTENT: {content}\n"
+        )
+        if reason:
+            line += f"  REASON : {reason[:150]}\n"
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def _safe_float(value, default: float = 0.0) -> float:
     try:
         return float(value)
@@ -122,7 +161,6 @@ def _safe_float(value, default: float = 0.0) -> float:
 
 
 def _clamp_highlights(highlights: list, video_duration: float) -> list:
-    """Clamp start/end to [0, video_duration] and drop zero-length clips."""
     clamped = []
     for h in highlights:
         try:
@@ -133,3 +171,29 @@ def _clamp_highlights(highlights: list, video_duration: float) -> list:
         if end - start >= 0.5:
             clamped.append({**h, "start": round(start, 2), "end": round(end, 2)})
     return clamped
+
+
+def _merge_adjacent(highlights: list, gap_threshold: float = 1.0) -> list:
+    """
+    Merge clips that are within gap_threshold seconds of each other.
+    Prevents jarring micro-cuts when the LLM picks consecutive segments.
+    """
+    if not highlights:
+        return highlights
+
+    # Sort chronologically first
+    sorted_h = sorted(highlights, key=lambda h: float(h["start"]))
+    merged = [dict(sorted_h[0])]
+
+    for curr in sorted_h[1:]:
+        prev = merged[-1]
+        gap = float(curr["start"]) - float(prev["end"])
+        if gap <= gap_threshold:
+            # Extend the previous clip to cover this one too
+            prev["end"] = max(float(prev["end"]), float(curr["end"]))
+            prev["id"] = "merged"
+            prev["reason"] = prev.get("reason", "") + " | " + curr.get("reason", "")
+        else:
+            merged.append(dict(curr))
+
+    return merged
