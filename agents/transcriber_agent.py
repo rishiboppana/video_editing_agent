@@ -301,22 +301,32 @@ class TranscriberAgent(BaseAgent):
 
         if len(images_b64) == 1:
             prompt = (
-                f"This frame is from a video at {sample_times[0]}s (scene: {start}s–{end}s). "
-                "Answer these 4 points in 1 sentence each:\n"
-                "1. CONTENT: What is happening and who/what is on screen?\n"
-                "2. EMOTION: What emotions are visible (e.g. joy, sadness, excitement, anger, neutral)?\n"
-                "3. ENERGY: What is the energy level — low / medium / high?\n"
-                "4. CROWD: Is there any audience or crowd reaction visible?"
+                f"Describe this video frame at {sample_times[0]}s (scene: {start}s-{end}s) "
+                "in maximum detail. Cover every point:\n\n"
+                "PEOPLE: How many people are visible? For each: "
+                "gender, approximate age, clothing, facial expression, body language, what they are doing.\n"
+                "OBJECTS: Every visible object, prop, instrument, vehicle, sign, or item of interest.\n"
+                "SETTING: Location type (stage, street, room, outdoor), background, lighting.\n"
+                "ACTIONS: Exactly what is happening? Movement, gestures, interactions, performance?\n"
+                "EMOTIONS: Emotions on faces and body language. Overall emotional atmosphere.\n"
+                "ENERGY: Energy level (low / medium / high) and what is driving it.\n"
+                "CROWD: Any audience or group -- size, reaction, engagement level.\n\n"
+                "Be specific and factual. Describe only what you can actually see."
             )
         else:
             times_str = ", ".join(f"{t}s" for t in sample_times)
             prompt = (
-                f"These {len(images_b64)} frames are from {start}s–{end}s (sampled at {times_str}). "
-                "Answer these 4 points in 1–2 sentences each:\n"
-                "1. CONTENT: What is happening and how does it change across the frames?\n"
-                "2. EMOTION: What emotions are visible throughout this segment?\n"
-                "3. ENERGY: Overall energy level — low / medium / high — and does it change?\n"
-                "4. CROWD: Any audience, crowd, or group reaction visible?"
+                f"These {len(images_b64)} frames are sampled at {times_str} "
+                f"from a video scene {start}s-{end}s. Describe in maximum detail:\n\n"
+                "PEOPLE: Who is present? For each: gender, age, clothing, expression, "
+                "body language, actions. Note changes across frames.\n"
+                "OBJECTS: Every visible object, prop, instrument, vehicle, or item.\n"
+                "SETTING: Location, background, lighting and how it changes.\n"
+                "ACTIONS: What is happening from start to end? Movement and changes.\n"
+                "EMOTIONS: Emotions on faces and body language. Overall emotional atmosphere.\n"
+                "ENERGY: Energy level (low / medium / high) and how it evolves.\n"
+                "CROWD: Audience or group presence, reaction and engagement level.\n\n"
+                "Be specific and factual. Describe only what you can actually see."
             )
 
         response = requests.post(

@@ -1,18 +1,27 @@
+import logging
+
+import numpy as np
+import requests
+
 from agents.base_agent import BaseAgent
+from config import EMBED_MODEL, EMBED_WEIGHT, OLLAMA_BASE_URL
+
+logger = logging.getLogger("orchestrator")
 
 
 class ExplainerAgent(BaseAgent):
     """
-    Uses Ollama to build semantic understanding of the video.
+    Builds semantic understanding of the video by:
+      1. Sending the synchronized speech + visual timeline to the LLM for
+         importance scoring and summary.
+      2. Embedding each scene's rich description with nomic-embed-text.
+      3. Embedding the user's style query (or a default "best highlights" query).
+      4. Computing cosine similarity between each scene and the style embedding.
+      5. Blending the LLM importance score with the embedding similarity to
+         produce a final importance score grounded in actual content matching.
 
-    Key enhancement: for every speech segment the prompt now includes the
-    visual description of what was concurrently on screen.  This lets the LLM
-    reason about *what was said* and *what was seen* at the same moment rather
-    than treating audio and visual as two separate streams.
-
-    Timeline format sent to the LLM:
-      [SPEECH 3.2s-7.8s | visual: person on stage gesturing to crowd]: "welcome everyone"
-      [VISUAL 8.0s-14.5s]: Close-up of instruments being set up on stage.
+    If the embedding model is unavailable, step 2-5 are silently skipped and
+    the pipeline continues with LLM-only scores.
     """
 
     SYSTEM = (
@@ -21,24 +30,31 @@ class ExplainerAgent(BaseAgent):
         "Always respond with ONLY a valid JSON object — no prose, no markdown fences."
     )
 
-    def run(self, transcript: dict, video_type: str = None, feedback: str = "") -> dict:
+    def run(
+        self,
+        transcript: dict,
+        video_type: str = None,
+        style: str = None,
+        feedback: str = "",
+    ) -> dict:
         audio_segs = transcript.get("segments", [])
         visual_segs = transcript.get("visual_segments", [])
 
-        # Build a fast lookup: for any point in time, which visual description applies?
-        # This lets us annotate every speech segment with what was on screen.
+        # ------------------------------------------------------------------
+        # Build synchronized timeline for the LLM
+        # ------------------------------------------------------------------
+
         def visual_desc_at(start: float, end: float) -> str:
             overlapping = [
                 v.get("description", "")
                 for v in visual_segs
                 if v["start"] < end and v["end"] > start
-                and v.get("description", "").strip()  # skip empty — no real content
+                and v.get("description", "").strip()
             ]
             return overlapping[0] if overlapping else ""
 
         all_entries = []
 
-        # Speech segments — annotated with the concurrent visual description
         for s in audio_segs:
             concurrent = visual_desc_at(s["start"], s["end"])
             if concurrent:
@@ -50,17 +66,15 @@ class ExplainerAgent(BaseAgent):
                 label = f"[SPEECH {s['start']}s-{s['end']}s]: \"{s['text']}\""
             all_entries.append({"start": float(s["start"]), "label": label})
 
-        # Visual-only segments (stand-alone scenes with no concurrent speech shown above)
         speech_times = {(s["start"], s["end"]) for s in audio_segs}
         for v in visual_segs:
-            # Only show visual as a standalone line if it doesn't overlap with any speech
             has_speech = any(
                 s_start < v["end"] and s_end > v["start"]
                 for s_start, s_end in speech_times
             )
             if not has_speech:
                 desc = v.get("description", "").strip()
-                if not desc:  # skip segments with no real visual content
+                if not desc:
                     continue
                 all_entries.append({
                     "start": float(v["start"]),
@@ -70,8 +84,18 @@ class ExplainerAgent(BaseAgent):
         all_entries.sort(key=lambda e: e["start"])
         content_block = "\n".join(e["label"] for e in all_entries)
 
-        feedback_block = f"\nPREVIOUS ATTEMPT FEEDBACK:\n{feedback}\n" if feedback else ""
+        if not content_block.strip():
+            return {
+                "summary": "No speech or visual content could be extracted from this video.",
+                "topics": [],
+                "tone": "unknown",
+                "pacing": "unknown",
+                "key_moments": [],
+                "segments": [],
+                "duration": transcript.get("duration", 0),
+            }
 
+        feedback_block = f"\nPREVIOUS ATTEMPT FEEDBACK:\n{feedback}\n" if feedback else ""
         video_type_block = (
             f"\nVideo type (user-specified): {video_type}\n"
             f"Interpret and score all segments through the lens of this video type.\n"
@@ -79,11 +103,11 @@ class ExplainerAgent(BaseAgent):
         )
 
         prompt = f"""Analyze this video's synchronized speech and visual content.
-Each SPEECH line shows what was said and (when available) what was visually on screen at that moment.
+Each SPEECH line shows what was said and (when available) what was visually on screen.
 Each VISUAL line shows a scene with no concurrent speech.
 {video_type_block}
-IMPORTANT: All "start" and "end" values must be plain numbers only (e.g. 4.5 not "4.5s").
-Importance must be a float between 0.0 and 1.0 (e.g. 0.8 not "high").
+IMPORTANT: All "start" and "end" values must be plain numbers (e.g. 4.5 not "4.5s").
+Importance must be a float 0.0-1.0 (e.g. 0.8 not "high").
 
 Return a JSON object with:
 - "summary": 2-3 sentences synthesizing what was said AND what was seen
@@ -91,12 +115,12 @@ Return a JSON object with:
 - "tone": overall tone (e.g. comedic, musical, action, educational, emotional)
 - "pacing": visual rhythm (e.g. fast cuts, slow cinematic, static talking-head)
 - "key_moments": most impactful moments, each with "start", "end", "description"
-- "segments": ALL speech and standalone visual entries listed below, each with:
+- "segments": ALL speech and standalone visual entries below, each with:
     - "id": original id (integer for speech, "v0"/"v1"/etc for visual)
     - "start": start seconds
     - "end": end seconds
     - "text": the speech quote or visual description
-    - "importance": 0.0–1.0 (1.0 = must be in the highlight reel)
+    - "importance": 0.0-1.0 (1.0 = must be in the highlight reel)
     - "reason": one sentence on why this score
 
 Video overview:
@@ -110,29 +134,125 @@ Synchronized timeline:
 {feedback_block}
 Return ONLY a JSON object."""
 
-        # Guard: if there is truly nothing to analyse, return a minimal result
-        # rather than sending an empty prompt to the LLM.
-        if not content_block.strip():
-            return {
-                "summary": "No speech or visual content could be extracted from this video.",
-                "topics": [],
-                "tone": "unknown",
-                "pacing": "unknown",
-                "key_moments": [],
-                "segments": [],
-                "duration": transcript.get("duration", 0),
-            }
-
         response = self.call_llm(prompt, system=self.SYSTEM)
         result = self.extract_json(response)
 
-        # Always carry duration forward so the highlighter can clamp timestamps
         result["duration"] = transcript.get("duration", 0)
-
         result["segments"] = self._merge_all_segments(
             audio_segs, visual_segs, result.get("segments", [])
         )
+
+        # ------------------------------------------------------------------
+        # Embedding-based similarity scoring
+        # Embed each segment's rich description and the style/query, then
+        # blend cosine similarity into the final importance score.
+        # ------------------------------------------------------------------
+        result["segments"] = self._enrich_with_embeddings(
+            segments=result["segments"],
+            style=style,
+            summary=result.get("summary", ""),
+        )
+
         return result
+
+    # ------------------------------------------------------------------
+    # Embedding methods
+    # ------------------------------------------------------------------
+
+    def _embed(self, text: str) -> list:
+        """Get a dense embedding vector from Ollama (nomic-embed-text)."""
+        try:
+            resp = requests.post(
+                f"{OLLAMA_BASE_URL}/api/embeddings",
+                json={"model": EMBED_MODEL, "prompt": text},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            return resp.json().get("embedding", [])
+        except Exception as e:
+            logger.debug(f"  [ExplainerAgent] embedding failed: {e}")
+            return []
+
+    @staticmethod
+    def _cosine_similarity(a: list, b: list) -> float:
+        if not a or not b:
+            return 0.0
+        va = np.array(a, dtype=np.float32)
+        vb = np.array(b, dtype=np.float32)
+        norm_a = np.linalg.norm(va)
+        norm_b = np.linalg.norm(vb)
+        if norm_a == 0 or norm_b == 0:
+            return 0.0
+        return float(np.dot(va, vb) / (norm_a * norm_b))
+
+    def _enrich_with_embeddings(
+        self, segments: list, style: str, summary: str
+    ) -> list:
+        """
+        For each segment embed its full description and compute cosine
+        similarity against the style query.  Blend with the LLM score:
+
+            final_importance = (1 - EMBED_WEIGHT) * llm_score
+                             + EMBED_WEIGHT * embedding_similarity
+
+        Silently returns the original list if embedding is unavailable.
+        """
+        # Build the query the user cares about
+        if style:
+            query = f"Video highlight preference: {style}"
+        else:
+            query = (
+                f"The most important, representative, and engaging moments "
+                f"from this video: {summary}"
+            )
+
+        logger.info(f"  [ExplainerAgent] embedding query: {query[:120]}")
+        query_vec = self._embed(query)
+
+        if not query_vec:
+            logger.info("  [ExplainerAgent] embedding unavailable — using LLM scores only")
+            return segments
+
+        enriched = []
+        for seg in segments:
+            # Build a rich description string: text + reason + any visual detail
+            description_parts = [
+                str(seg.get("text", "")),
+                str(seg.get("reason", "")),
+            ]
+            description = " ".join(p for p in description_parts if p.strip())
+
+            seg_vec = self._embed(description) if description.strip() else []
+
+            if seg_vec:
+                sim = self._cosine_similarity(query_vec, seg_vec)
+                llm_score = float(seg.get("importance", 0.5))
+                blended = round(
+                    (1 - EMBED_WEIGHT) * llm_score + EMBED_WEIGHT * sim, 3
+                )
+                enriched.append({
+                    **seg,
+                    "importance": blended,
+                    "llm_score": round(llm_score, 3),
+                    "embedding_score": round(sim, 3),
+                    "reason": (
+                        f"{seg.get('reason', '')} "
+                        f"[embedding similarity to style: {sim:.2f}]"
+                    ).strip(),
+                })
+            else:
+                enriched.append(seg)
+
+        scored = sum(1 for s in enriched if "embedding_score" in s)
+        logger.info(
+            f"  [ExplainerAgent] embedding scores computed for "
+            f"{scored}/{len(enriched)} segments"
+        )
+        return enriched
+
+    # ------------------------------------------------------------------
+    # Validation
+    # ------------------------------------------------------------------
 
     def validate(self, output: dict, **kwargs) -> tuple:
         for field in ("summary", "topics", "tone", "segments"):
@@ -143,12 +263,14 @@ Return ONLY a JSON object."""
         if not output["segments"]:
             return False, "segments list is empty"
 
-        # Auto-heal bad importance values rather than rejecting the whole output.
-        # The LLM sometimes returns "high"/"low"/null — normalise them in place.
         for seg in output["segments"]:
             seg["importance"] = _normalise_importance(seg.get("importance"))
 
         return True, f"{len(output['segments'])} segments analyzed"
+
+    # ------------------------------------------------------------------
+    # Segment merging
+    # ------------------------------------------------------------------
 
     def _merge_all_segments(self, audio: list, visual: list, scored: list) -> list:
         scored_map = {str(s.get("id")): s for s in scored}
@@ -175,7 +297,7 @@ Return ONLY a JSON object."""
                     merged.append(entry)
             elif is_sparse_audio:
                 desc = seg.get("description", "").strip()
-                if desc:  # only include if there is actual visual content
+                if desc:
                     merged.append({
                         **seg,
                         "text": desc,
@@ -195,11 +317,8 @@ _TEXT_TO_IMPORTANCE = {
     "high": 0.8, "very high": 0.95, "critical": 1.0,
 }
 
+
 def _normalise_importance(value) -> float:
-    """
-    Convert whatever the LLM returned for importance into a valid float 0–1.
-    Handles: float, int, numeric string, text labels, None.
-    """
     if value is None:
         return 0.4
     if isinstance(value, (int, float)):

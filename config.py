@@ -17,6 +17,14 @@ OUTPUT_DIR = os.getenv("OUTPUT_DIR", "output")
 # ── Orchestrator ──────────────────────────────────────────────────────
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 
+# ── Embeddings ───────────────────────────────────────────────────────
+# Used to match scene descriptions against the user's style query.
+# nomic-embed-text is small (274 MB) and purpose-built for semantic search.
+# Pull once: ollama pull nomic-embed-text
+EMBED_MODEL = os.getenv("EMBED_MODEL", "nomic-embed-text")
+# Weight of embedding similarity vs LLM importance score (must sum to 1.0)
+EMBED_WEIGHT = float(os.getenv("EMBED_WEIGHT", "0.4"))
+
 # ── Vision (LLaVA frame description) ─────────────────────────────────
 # Requires a GPU (NVIDIA CUDA or Apple Silicon MPS) for practical speed.
 # Set ENABLE_VISION=false only if running on CPU-only hardware temporarily.

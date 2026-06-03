@@ -74,10 +74,10 @@ class OrchestratorAgent(BaseAgent):
         logger.info("\n[STEP 2/4]  EXPLANATION")
         explanation = self._run_with_retry(
             agent=self.explainer,
-            run_kwargs={"transcript": transcript, "video_type": video_type},
+            run_kwargs={"transcript": transcript, "video_type": video_type, "style": style},
             review_context=(
                 f"Analyzing {len(transcript['segments'])} segments "
-                f"of a '{video_type or 'unknown'}' video."
+                f"of a '{video_type or 'unknown'}' video. Style: '{style or 'none'}'."
             ),
         )
         logger.info(f"  → summary: {explanation.get('summary', '')[:160]}")
