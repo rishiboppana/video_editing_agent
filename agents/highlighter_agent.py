@@ -142,7 +142,7 @@ def _build_segments_text(segments: list) -> str:
         sid = s.get("id", "?")
         start = s.get("start", 0)
         end = s.get("end", 0)
-        text = s.get("text", "[no text]")
+        text = s.get("text", "")
         reason = s.get("reason", "")
 
         # Summarise the content: trim long descriptions but keep key signals
@@ -150,7 +150,7 @@ def _build_segments_text(segments: list) -> str:
 
         line = (
             f"[id={sid} | {start}s-{end}s | importance={imp:.2f}]\n"
-            f"  CONTENT: {content}\n"
+            f"  CONTENT: {content if content else '(no description available)'}\n"
         )
         if reason:
             line += f"  REASON : {reason[:150]}\n"

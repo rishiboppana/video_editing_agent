@@ -32,9 +32,7 @@ class ExplainerAgent(BaseAgent):
                 v.get("description", "")
                 for v in visual_segs
                 if v["start"] < end and v["end"] > start
-                and v.get("description", "").strip()
-                and "not individually analyzed" not in v.get("description", "")
-                and "unavailable" not in v.get("description", "")
+                and v.get("description", "").strip()  # skip empty — no real content
             ]
             return overlapping[0] if overlapping else ""
 
@@ -61,11 +59,8 @@ class ExplainerAgent(BaseAgent):
                 for s_start, s_end in speech_times
             )
             if not has_speech:
-                desc = v.get("description", "")
-                # Skip placeholder descriptions — they carry no real information
-                # and confuse the LLM (e.g. "[vision disabled]" gets interpreted
-                # as a topic about disability).
-                if not desc or any(p in desc for p in ("[vision", "[brief", "[visual desc")):
+                desc = v.get("description", "").strip()
+                if not desc:  # skip segments with no real visual content
                     continue
                 all_entries.append({
                     "start": float(v["start"]),
@@ -179,13 +174,14 @@ Return ONLY a JSON object."""
                 if is_sparse_audio or entry["importance"] >= 0.5:
                     merged.append(entry)
             elif is_sparse_audio:
-                desc = seg.get("description", "[visual scene]")
-                merged.append({
-                    **seg,
-                    "text": desc,
-                    "importance": 0.4,
-                    "reason": "Visual-dominant video filler",
-                })
+                desc = seg.get("description", "").strip()
+                if desc:  # only include if there is actual visual content
+                    merged.append({
+                        **seg,
+                        "text": desc,
+                        "importance": 0.4,
+                        "reason": "Visual segment in sparse-audio video",
+                    })
 
         return sorted(merged, key=lambda x: float(x.get("start", 0)))
 

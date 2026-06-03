@@ -205,10 +205,9 @@ class TranscriberAgent(BaseAgent):
 
     def _describe_scenes(self, video_path: str, scenes: list) -> list:
         if not ENABLE_VISION:
-            logger.info("  [TranscriberAgent] vision disabled (ENABLE_VISION=false) — skipping LLaVA")
-            return [{**s, "description": "[vision disabled]", "type": "visual"} for s in scenes]
+            logger.info("  [TranscriberAgent] vision disabled — skipping LLaVA")
+            return [{**s, "description": "", "type": "visual"} for s in scenes]
 
-        # Prioritise longest scenes for LLaVA (they carry the most visual information)
         priority = sorted(scenes, key=lambda s: s["end"] - s["start"], reverse=True)
         describe_ids = {s["id"] for s in priority[:MAX_VISUAL_DESCRIPTIONS]}
 
@@ -217,24 +216,15 @@ class TranscriberAgent(BaseAgent):
 
         for scene in scenes:
             if scene["id"] not in describe_ids:
-                described.append({
-                    **scene,
-                    "description": "[brief scene — not individually analyzed]",
-                    "type": "visual",
-                })
+                described.append({**scene, "description": "", "type": "visual"})
                 continue
 
-            # If vision model is consistently timing out, stop trying
             if consecutive_failures >= VISION_MAX_CONSECUTIVE_FAILURES:
                 logger.warning(
                     f"  [TranscriberAgent] {consecutive_failures} consecutive vision "
                     "timeouts — skipping remaining vision calls"
                 )
-                described.append({
-                    **scene,
-                    "description": "[vision skipped — model too slow for this hardware]",
-                    "type": "visual",
-                })
+                described.append({**scene, "description": "", "type": "visual"})
                 continue
 
             seg_duration = scene["end"] - scene["start"]
@@ -266,7 +256,7 @@ class TranscriberAgent(BaseAgent):
                     f"  [TranscriberAgent] vision failed for {scene['id']} "
                     f"({e}) [{consecutive_failures}/{VISION_MAX_CONSECUTIVE_FAILURES}]"
                 )
-                description = "[visual description unavailable]"
+                description = ""
             finally:
                 for fp in frame_paths:
                     if os.path.exists(fp):

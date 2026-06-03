@@ -4,7 +4,7 @@ import time
 
 import requests
 
-from config import OLLAMA_BASE_URL, OLLAMA_MODEL
+from config import OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_TIMEOUT
 
 
 class BaseAgent:
@@ -40,7 +40,7 @@ class BaseAgent:
                 resp = requests.post(
                     f"{OLLAMA_BASE_URL}/api/chat",
                     json=payload,
-                    timeout=120,
+                    timeout=OLLAMA_TIMEOUT,
                 )
                 resp.raise_for_status()
                 return resp.json()["message"]["content"]
