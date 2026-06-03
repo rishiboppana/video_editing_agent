@@ -69,6 +69,12 @@ class OrchestratorAgent(BaseAgent):
             f"  → {len(transcript['segments'])} segments | lang={transcript.get('language')} | "
             f"preview: {transcript['full_text'][:120]}…"
         )
+        if transcript.get("is_visual_dominant"):
+            logger.warning(
+                "  [ORCHESTRATOR] Visual-dominant video detected — very little or no speech found. "
+                "Results will be significantly better with ENABLE_VISION=true (requires GPU). "
+                "Scene selection will use time-proportional sampling as fallback."
+            )
 
         # ── Step 2: Explanation ─────────────────────────────────────────
         logger.info("\n[STEP 2/4]  EXPLANATION")

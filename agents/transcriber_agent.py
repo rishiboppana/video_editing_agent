@@ -103,28 +103,31 @@ class TranscriberAgent(BaseAgent):
         audio_path = self._extract_audio(video_path)
         try:
             result = self._transcribe(audio_path)
-            audio_segments = [
-                {
-                    "id": i,
-                    "start": round(seg["start"], 2),
-                    "end": round(seg["end"], 2),
-                    "text": seg["text"].strip(),
-                }
-                for i, seg in enumerate(result["segments"])
-                if seg["text"].strip()
-            ]
+            audio_segments = self._filter_hallucinations(result["segments"])
         finally:
             if os.path.exists(audio_path):
                 os.remove(audio_path)
+
+        # Detect visual-dominant videos: less than 8% of duration is real speech
+        speech_duration = sum(s["end"] - s["start"] for s in audio_segments)
+        is_visual_dominant = duration > 0 and (speech_duration / duration) < 0.08
+
+        if is_visual_dominant:
+            logger.info(
+                f"  [TranscriberAgent] visual-dominant video detected "
+                f"({speech_duration:.1f}s speech / {duration:.1f}s total = "
+                f"{100*speech_duration/duration:.0f}%)"
+            )
 
         logger.info(f"  [TranscriberAgent] {len(audio_segments)} speech segments transcribed")
 
         return {
             "segments": audio_segments,
             "visual_segments": visual_segments,
-            "full_text": result["text"].strip(),
+            "full_text": " ".join(s["text"] for s in audio_segments),
             "language": result.get("language", "unknown"),
             "duration": duration,
+            "is_visual_dominant": is_visual_dominant,
         }
 
     # ------------------------------------------------------------------
@@ -136,21 +139,74 @@ class TranscriberAgent(BaseAgent):
     # fixed chunks if nothing is found.
     # ------------------------------------------------------------------
 
-    def _detect_scenes(self, video_path: str, duration: float) -> list:
-        try:
-            segments = self._detect_with_ffmpeg(video_path, duration)
-            if len(segments) > 1:
-                return segments
-            logger.info(
-                "  [TranscriberAgent] no scene cuts at threshold "
-                f"{SCENE_THRESHOLD} — using adaptive chunks"
-            )
-        except Exception as e:
-            logger.warning(f"  [TranscriberAgent] scene detection error: {e}")
+    def _filter_hallucinations(self, raw_segments: list) -> list:
+        """
+        Filter Whisper segments using its own confidence metrics.
 
+        Whisper returns per-segment:
+          no_speech_prob : probability the segment contains NO speech (0-1)
+          avg_logprob    : average log-probability of tokens (0 = perfect, -inf = noise)
+
+        We discard segments the model itself is not confident about.
+        """
+        kept = []
+        for i, seg in enumerate(raw_segments):
+            text = seg.get("text", "").strip()
+            if not text:
+                continue
+
+            no_speech = seg.get("no_speech_prob", 0.0)
+            avg_lp = seg.get("avg_logprob", 0.0)
+
+            # Skip if model says this is probably silence/music
+            if no_speech > 0.5:
+                logger.info(
+                    f"  [TranscriberAgent] seg {i} dropped "
+                    f"(no_speech_prob={no_speech:.2f}): {text[:50]}"
+                )
+                continue
+
+            # Skip if model has very low confidence (likely hallucination)
+            if avg_lp < -0.8:
+                logger.info(
+                    f"  [TranscriberAgent] seg {i} dropped "
+                    f"(avg_logprob={avg_lp:.2f}): {text[:50]}"
+                )
+                continue
+
+            kept.append({
+                "id": len(kept),
+                "start": round(seg["start"], 2),
+                "end": round(seg["end"], 2),
+                "text": text,
+            })
+
+        return kept
+
+    def _detect_scenes(self, video_path: str, duration: float) -> list:
+        """
+        Try scene detection at decreasing sensitivity levels.
+        Hard cuts → 0.15, soft transitions → 0.08, fallback → adaptive chunks.
+        """
+        for threshold in [SCENE_THRESHOLD, 0.08]:
+            try:
+                segments = self._detect_with_ffmpeg(video_path, duration, threshold)
+                if len(segments) > 1:
+                    logger.info(
+                        f"  [TranscriberAgent] {len(segments)} scene cuts "
+                        f"found at threshold {threshold}"
+                    )
+                    return segments
+                logger.info(
+                    f"  [TranscriberAgent] no cuts at threshold {threshold}, trying lower..."
+                )
+            except Exception as e:
+                logger.warning(f"  [TranscriberAgent] scene detection error at {threshold}: {e}")
+
+        logger.info("  [TranscriberAgent] no scene cuts detected — using adaptive chunks")
         return self._adaptive_chunks(duration)
 
-    def _detect_with_ffmpeg(self, video_path: str, duration: float) -> list:
+    def _detect_with_ffmpeg(self, video_path: str, duration: float, threshold: float = None) -> list:
         """
         Detect scene cuts using ffmpeg's select + showinfo filter pipeline.
 
@@ -161,9 +217,10 @@ class TranscriberAgent(BaseAgent):
           [Parsed_showinfo_1 @ 0x...] n:5 pts:5005 pts_time:0.167 ...
         which we parse to get exact scene-cut timestamps.
         """
+        t = threshold if threshold is not None else SCENE_THRESHOLD
         cmd = [
             FFMPEG_PATH, "-i", video_path,
-            "-vf", f"select='gt(scene,{SCENE_THRESHOLD})',showinfo",
+            "-vf", f"select='gt(scene,{t})',showinfo",
             "-vsync", "0", "-an", "-f", "null", "-",
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, check=False)
@@ -383,30 +440,15 @@ class TranscriberAgent(BaseAgent):
             if field not in output:
                 return False, f"Missing field: {field}"
 
-        full_text = (output.get("full_text") or "").strip()
-
-        hallucinations = [
-            "thank you for watching", "thanks for watching",
-            "please subscribe", "amara.org", "subtitle by", "brought to you by",
-        ]
-        if full_text and any(h in full_text.lower() for h in hallucinations) and len(full_text) < 100:
-            output["full_text"] = ""
-            output["segments"] = []
-            return True, "Hallucination caught; treating as silent video"
-
-        words = full_text.lower().split()
-        if len(words) > 10 and len(set(words)) / len(words) < 0.2:
-            output["full_text"] = ""
-            output["segments"] = []
-            return True, "Repetitive noise caught; treating as silent video"
-
         for seg in output["segments"]:
             if not all(k in seg for k in ("id", "start", "end", "text")):
                 return False, f"Segment missing required keys: {seg}"
             if seg["end"] <= seg["start"]:
                 return False, f"Segment has invalid time range: {seg}"
 
+        visual_dominant = output.get("is_visual_dominant", False)
+        status = "visual-dominant" if visual_dominant else "speech-present"
         return True, (
             f"{len(output['segments'])} speech segments, "
-            f"{len(output['visual_segments'])} visual scenes"
+            f"{len(output['visual_segments'])} visual scenes [{status}]"
         )

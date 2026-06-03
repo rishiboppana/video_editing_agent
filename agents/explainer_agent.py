@@ -84,16 +84,18 @@ class ExplainerAgent(BaseAgent):
         all_entries.sort(key=lambda e: e["start"])
         content_block = "\n".join(e["label"] for e in all_entries)
 
-        if not content_block.strip():
-            return {
-                "summary": "No speech or visual content could be extracted from this video.",
-                "topics": [],
-                "tone": "unknown",
-                "pacing": "unknown",
-                "key_moments": [],
-                "segments": [],
-                "duration": transcript.get("duration", 0),
-            }
+        # Visual-dominant video with no real visual descriptions (vision disabled)
+        # — fall back to time-proportional importance so the pipeline can still
+        # produce a reasonable highlight rather than analyzing garbage transcript.
+        is_visual_dominant = transcript.get("is_visual_dominant", False)
+        if not content_block.strip() or (is_visual_dominant and not any(
+            v.get("description", "").strip() for v in visual_segs
+        )):
+            logger.info(
+                "  [ExplainerAgent] no analyzable content — "
+                "using time-proportional segment scoring"
+            )
+            return self._time_proportional_result(transcript, style)
 
         feedback_block = f"\nPREVIOUS ATTEMPT FEEDBACK:\n{feedback}\n" if feedback else ""
         video_type_block = (
@@ -267,6 +269,75 @@ Return ONLY a JSON object."""
             seg["importance"] = _normalise_importance(seg.get("importance"))
 
         return True, f"{len(output['segments'])} segments analyzed"
+
+    # ------------------------------------------------------------------
+    # Time-proportional fallback (visual-dominant, no vision)
+    # ------------------------------------------------------------------
+
+    def _time_proportional_result(self, transcript: dict, style: str = None) -> dict:
+        """
+        When the video has no usable speech or visual descriptions, divide it
+        into segments and score them by timeline position.
+
+        Importance curve — weighted toward the middle and end of the video
+        where key moments (kisses, reactions, climax) typically occur:
+          first quarter  : 0.50  (setup/context)
+          second quarter : 0.70  (rising action)
+          third quarter  : 0.90  (peak / climax)
+          fourth quarter : 0.80  (resolution)
+        """
+        duration = float(transcript.get("duration", 0))
+        visual_segs = transcript.get("visual_segments", [])
+
+        def _position_importance(start: float, end: float) -> float:
+            mid = (start + end) / 2
+            ratio = mid / duration if duration > 0 else 0.5
+            if ratio < 0.25:
+                return 0.50
+            elif ratio < 0.50:
+                return 0.70
+            elif ratio < 0.75:
+                return 0.90
+            else:
+                return 0.80
+
+        segments = []
+        for v in visual_segs:
+            imp = _position_importance(v["start"], v["end"])
+            segments.append({
+                "id": v["id"],
+                "start": v["start"],
+                "end": v["end"],
+                "text": "",
+                "importance": imp,
+                "reason": (
+                    f"Time-proportional score — no visual analysis available. "
+                    f"Position: {v['start']:.1f}s-{v['end']:.1f}s of {duration:.1f}s total."
+                ),
+            })
+
+        # Apply embedding enrichment if style is provided
+        if style and segments:
+            segments = self._enrich_with_embeddings(
+                segments=segments,
+                style=style,
+                summary=f"video of {duration:.0f} seconds",
+            )
+
+        return {
+            "summary": (
+                f"Visual-dominant video ({duration:.0f}s). "
+                "No speech detected and visual analysis is disabled. "
+                "Segments are scored by timeline position."
+            ),
+            "topics": [],
+            "tone": "unknown",
+            "pacing": "unknown",
+            "key_moments": [],
+            "segments": sorted(segments, key=lambda x: float(x.get("start", 0))),
+            "duration": duration,
+            "is_visual_dominant": True,
+        }
 
     # ------------------------------------------------------------------
     # Segment merging
