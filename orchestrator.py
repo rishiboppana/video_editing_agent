@@ -64,6 +64,7 @@ class OrchestratorAgent(BaseAgent):
             agent=self.transcriber,
             run_kwargs={"video_path": video_path},
             review_context=f"Transcribing video '{video_path}' with Whisper.",
+            skip_review=True,   # Whisper+ffmpeg are deterministic; LLM review adds no value
         )
         logger.info(
             f"  → {len(transcript['segments'])} segments | lang={transcript.get('language')} | "
@@ -128,6 +129,7 @@ class OrchestratorAgent(BaseAgent):
             review_context=(
                 f"Cutting {len(ordered_highlights)} clips and joining into {output_path}."
             ),
+            skip_review=True,   # ffmpeg is deterministic; file existence check is enough
         )
         logger.info(f"  → output  : {edit_result['output_path']}")
         logger.info(f"  → duration: {edit_result['duration']}s")
@@ -164,6 +166,7 @@ class OrchestratorAgent(BaseAgent):
         run_kwargs: dict,
         validate_kwargs: dict = None,
         review_context: str = "",
+        skip_review: bool = False,
     ) -> dict:
         validate_kwargs = validate_kwargs or {}
         feedback = ""
@@ -191,6 +194,13 @@ class OrchestratorAgent(BaseAgent):
             logger.info(f"  [{agent.name}] structural OK  — {msg}")
 
             # ── 2. Semantic review by orchestrator ──────────────────────
+            # Skip for deterministic agents (Whisper/ffmpeg) — the LLM reviewer
+            # misinterprets valid outputs like "0 speech segments" as errors.
+            if skip_review:
+                logger.info(f"  [{agent.name}] semantic review skipped")
+                logger.info(f"  [{agent.name}] accepted on attempt {attempt}")
+                return output
+
             satisfied, review_feedback = self._review_output(
                 agent.name, output, review_context
             )

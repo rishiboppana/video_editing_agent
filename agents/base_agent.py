@@ -119,30 +119,51 @@ class BaseAgent:
     def _try_close_truncated(self, text: str):
         """
         Close a JSON object that was cut off mid-generation.
-        Strips the dangling partial value, then appends the missing
-        closing braces/brackets to make it valid.
+
+        Uses a bracket stack to determine the exact closing sequence needed.
+        This produces the correct order (e.g. }]} not ]}} ) which the naive
+        brace-counting approach gets wrong for nested structures.
         """
-        # Remove trailing incomplete string or value
-        # Walk back to the last complete key-value pair
         truncated = text.rstrip()
 
-        # Remove trailing comma or incomplete token
-        truncated = re.sub(r',?\s*"[^"]*$', '', truncated)   # trailing partial string
-        truncated = re.sub(r',\s*$', '', truncated)           # trailing comma
+        # Strip a dangling partial string value at the end
+        # e.g. ..."reason":"Two people are in the foregr  ->  ..."reason":"..."
+        truncated = re.sub(r',?\s*"[^"]*$', '', truncated)
+        truncated = re.sub(r',\s*$', '', truncated)
 
-        # Count unmatched braces and brackets
-        opens = truncated.count('{') - truncated.count('}')
-        arr_opens = truncated.count('[') - truncated.count(']')
-
-        if opens <= 0:
+        if not truncated.startswith('{'):
             return None
 
-        # Close arrays first, then objects
-        closing = ']' * max(arr_opens, 0) + '}' * opens
-        repaired = truncated + closing
+        # Walk the cleaned text with a stack to find exactly what's unclosed
+        OPENERS = {'{': '}', '[': ']'}
+        CLOSERS = set('}]')
+        stack = []
+        in_string = False
+        escape_next = False
 
-        # Also clean trailing commas introduced by the truncation
-        repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
+        for ch in truncated:
+            if escape_next:
+                escape_next = False
+                continue
+            if ch == '\\' and in_string:
+                escape_next = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch in OPENERS:
+                stack.append(OPENERS[ch])
+            elif ch in CLOSERS and stack and stack[-1] == ch:
+                stack.pop()
+
+        if not stack:
+            return None
+
+        # Close in reverse stack order — this gives the correct nesting sequence
+        closing = ''.join(reversed(stack))
+        repaired = re.sub(r",\s*([}\]])", r"\1", truncated + closing)
 
         try:
             return json.loads(repaired)
