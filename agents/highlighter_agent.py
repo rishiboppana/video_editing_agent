@@ -94,6 +94,10 @@ Return ONLY a JSON object."""
         # Merge clips that are <= 1s apart — avoids micro-cuts
         highlights = _merge_adjacent(highlights, gap_threshold=1.0)
 
+        # Enforce duration limit in code — never rely on the LLM to do arithmetic.
+        # Sort chronologically first, then greedily keep clips until budget is full.
+        highlights = _enforce_duration_limit(highlights, max_dur)
+
         total = sum(h["end"] - h["start"] for h in highlights)
         result["highlights"] = highlights
         result["total_duration"] = round(total, 2)
@@ -176,6 +180,31 @@ def _clamp_highlights(highlights: list, video_duration: float) -> list:
         if end - start >= 0.5:
             clamped.append({**h, "start": round(start, 2), "end": round(end, 2)})
     return clamped
+
+
+def _enforce_duration_limit(highlights: list, max_dur: float) -> list:
+    """
+    Greedily keep clips in chronological order until the duration budget is full.
+    If a clip would push the total over the limit, trim it to fit the remaining
+    budget (as long as the trimmed portion is >= 0.5s).
+
+    This runs in code so validation never fails due to LLM arithmetic errors.
+    """
+    result = []
+    total = 0.0
+    for h in sorted(highlights, key=lambda x: float(x["start"])):
+        clip_dur = float(h["end"]) - float(h["start"])
+        remaining = max_dur - total
+        if clip_dur <= remaining:
+            result.append(h)
+            total += clip_dur
+        else:
+            # Trim this clip to exactly fill the remaining budget
+            if remaining >= 0.5:
+                trimmed = {**h, "end": round(float(h["start"]) + remaining, 2)}
+                result.append(trimmed)
+            break
+    return result
 
 
 def _merge_adjacent(highlights: list, gap_threshold: float = 1.0) -> list:
