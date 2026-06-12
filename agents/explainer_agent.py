@@ -314,6 +314,7 @@ Return ONLY a JSON object."""
                     f"Time-proportional score — no visual analysis available. "
                     f"Position: {v['start']:.1f}s-{v['end']:.1f}s of {duration:.1f}s total."
                 ),
+                "focus_position": v.get("focus_position", "center"),
             })
 
         # Apply embedding enrichment if style is provided
@@ -343,6 +344,17 @@ Return ONLY a JSON object."""
     # Segment merging
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _focus_at(visual: list, start: float, end: float) -> str:
+        """Look up the LLaVA-reported focus position for whichever visual scene
+        overlaps this time range. Defaults to "center" when none is available."""
+        for v in visual:
+            if v["start"] < end and v["end"] > start:
+                fp = v.get("focus_position")
+                if fp:
+                    return fp
+        return "center"
+
     def _merge_all_segments(self, audio: list, visual: list, scored: list) -> list:
         scored_map = {str(s.get("id")): s for s in scored}
         merged = []
@@ -352,9 +364,15 @@ Return ONLY a JSON object."""
             if key in scored_map:
                 entry = dict(scored_map[key])
                 entry["importance"] = _normalise_importance(entry.get("importance"))
+                entry.setdefault("focus_position", self._focus_at(visual, seg["start"], seg["end"]))
                 merged.append(entry)
             else:
-                merged.append({**seg, "importance": 0.4, "reason": "Not individually analyzed"})
+                merged.append({
+                    **seg,
+                    "importance": 0.4,
+                    "reason": "Not individually analyzed",
+                    "focus_position": self._focus_at(visual, seg["start"], seg["end"]),
+                })
 
         audio_duration = sum(s["end"] - s["start"] for s in audio)
         is_sparse_audio = audio_duration < 5.0
@@ -364,6 +382,7 @@ Return ONLY a JSON object."""
             if key in scored_map:
                 entry = dict(scored_map[key])
                 entry["importance"] = _normalise_importance(entry.get("importance"))
+                entry.setdefault("focus_position", seg.get("focus_position", "center"))
                 if is_sparse_audio or entry["importance"] >= 0.5:
                     merged.append(entry)
             elif is_sparse_audio:

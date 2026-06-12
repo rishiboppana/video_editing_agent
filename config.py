@@ -36,6 +36,20 @@ VISION_TIMEOUT = int(os.getenv("VISION_TIMEOUT", "180"))
 VISION_MULTI_FRAME_MIN = float(os.getenv("VISION_MULTI_FRAME_MIN", "15.0"))
 VISION_MAX_CONSECUTIVE_FAILURES = int(os.getenv("VISION_MAX_CONSECUTIVE_FAILURES", "2"))
 
+# ── Zoom / Focus ──────────────────────────────────────────────────────
+# Shared 3x3 grid vocabulary used by:
+#   - TranscriberAgent  : LLaVA reports where the subject/action is in frame
+#   - HighlighterAgent  : picks a zoom target + level per highlight clip
+#   - EditorAgent       : maps the grid cell to a crop anchor for ffmpeg
+FOCUS_POSITIONS = [
+    "center",
+    "top-left", "top-center", "top-right",
+    "middle-left", "middle-right",
+    "bottom-left", "bottom-center", "bottom-right",
+]
+# Maximum "punch-in" zoom level (1.0 = no zoom, 2.0 = crop to half width/height)
+ZOOM_MAX_LEVEL = float(os.getenv("ZOOM_MAX_LEVEL", "1.6"))
+
 # ── FFmpeg Discovery ──────────────────────────────────────────────────
 _FFMPEG_FALLBACKS = [
     "/opt/homebrew/bin/ffmpeg",   # Apple Silicon

@@ -13,6 +13,7 @@ from agents.base_agent import BaseAgent
 from config import (
     ENABLE_VISION,
     FFMPEG_PATH, FFPROBE_PATH,
+    FOCUS_POSITIONS,
     MAX_VISUAL_DESCRIPTIONS, OLLAMA_BASE_URL,
     VISION_MODEL, VISION_TIMEOUT,
     VISION_MULTI_FRAME_MIN, VISION_MAX_CONSECUTIVE_FAILURES,
@@ -23,6 +24,24 @@ logger = logging.getLogger("orchestrator")
 
 # Lower threshold = more sensitive to cuts (0.15 catches soft transitions too)
 SCENE_THRESHOLD = float(os.getenv("SCENE_THRESHOLD", "0.15"))
+
+_FOCUS_RE = re.compile(r"\n?FOCUS:\s*([a-zA-Z\-]+)\s*$", re.IGNORECASE)
+
+
+def _split_focus(description: str) -> tuple:
+    """
+    Pull the trailing 'FOCUS: <position>' line off a LLaVA description.
+
+    Returns (cleaned_description, focus_position), defaulting to "center"
+    when the line is missing or names an unrecognised grid cell.
+    """
+    m = _FOCUS_RE.search(description)
+    if not m:
+        return description.strip(), "center"
+    position = m.group(1).strip().lower()
+    if position not in FOCUS_POSITIONS:
+        position = "center"
+    return _FOCUS_RE.sub("", description).strip(), position
 
 
 def _best_device() -> str:
@@ -263,7 +282,7 @@ class TranscriberAgent(BaseAgent):
     def _describe_scenes(self, video_path: str, scenes: list) -> list:
         if not ENABLE_VISION:
             logger.info("  [TranscriberAgent] vision disabled — skipping LLaVA")
-            return [{**s, "description": "", "type": "visual"} for s in scenes]
+            return [{**s, "description": "", "focus_position": "center", "type": "visual"} for s in scenes]
 
         priority = sorted(scenes, key=lambda s: s["end"] - s["start"], reverse=True)
         describe_ids = {s["id"] for s in priority[:MAX_VISUAL_DESCRIPTIONS]}
@@ -273,7 +292,7 @@ class TranscriberAgent(BaseAgent):
 
         for scene in scenes:
             if scene["id"] not in describe_ids:
-                described.append({**scene, "description": "", "type": "visual"})
+                described.append({**scene, "description": "", "focus_position": "center", "type": "visual"})
                 continue
 
             if consecutive_failures >= VISION_MAX_CONSECUTIVE_FAILURES:
@@ -281,7 +300,7 @@ class TranscriberAgent(BaseAgent):
                     f"  [TranscriberAgent] {consecutive_failures} consecutive vision "
                     "timeouts — skipping remaining vision calls"
                 )
-                described.append({**scene, "description": "", "type": "visual"})
+                described.append({**scene, "description": "", "focus_position": "center", "type": "visual"})
                 continue
 
             seg_duration = scene["end"] - scene["start"]
@@ -303,9 +322,10 @@ class TranscriberAgent(BaseAgent):
                     fp = tempfile.mktemp(suffix=".jpg")
                     self._extract_frame(video_path, t, fp)
                     frame_paths.append(fp)
-                description = self._ask_vision_llm(
+                raw_description = self._ask_vision_llm(
                     frame_paths, scene["start"], scene["end"], sample_times
                 )
+                description, focus_position = _split_focus(raw_description)
                 consecutive_failures = 0  # reset on success
             except Exception as e:
                 consecutive_failures += 1
@@ -313,7 +333,7 @@ class TranscriberAgent(BaseAgent):
                     f"  [TranscriberAgent] vision failed for {scene['id']} "
                     f"({e}) [{consecutive_failures}/{VISION_MAX_CONSECUTIVE_FAILURES}]"
                 )
-                description = ""
+                description, focus_position = "", "center"
             finally:
                 for fp in frame_paths:
                     if os.path.exists(fp):
@@ -322,6 +342,7 @@ class TranscriberAgent(BaseAgent):
             described.append({
                 **scene,
                 "description": description,
+                "focus_position": focus_position,
                 "type": "visual",
                 "sample_times": sample_times,
             })
@@ -356,6 +377,13 @@ class TranscriberAgent(BaseAgent):
             with open(fp, "rb") as f:
                 images_b64.append(base64.b64encode(f.read()).decode("utf-8"))
 
+        focus_instruction = (
+            "\nFOCUS: On its own final line, write exactly 'FOCUS: <position>' where "
+            "<position> is the ONE grid cell that best contains the main subject or "
+            "action, chosen from: " + ", ".join(FOCUS_POSITIONS) + ". "
+            "Use 'center' if the subject fills the frame or is evenly spread out."
+        )
+
         if len(images_b64) == 1:
             prompt = (
                 f"Describe this video frame at {sample_times[0]}s (scene: {start}s-{end}s) "
@@ -367,7 +395,8 @@ class TranscriberAgent(BaseAgent):
                 "ACTIONS: Exactly what is happening? Movement, gestures, interactions, performance?\n"
                 "EMOTIONS: Emotions on faces and body language. Overall emotional atmosphere.\n"
                 "ENERGY: Energy level (low / medium / high) and what is driving it.\n"
-                "CROWD: Any audience or group -- size, reaction, engagement level.\n\n"
+                "CROWD: Any audience or group -- size, reaction, engagement level.\n"
+                f"{focus_instruction}\n\n"
                 "Be specific and factual. Describe only what you can actually see."
             )
         else:
@@ -382,7 +411,8 @@ class TranscriberAgent(BaseAgent):
                 "ACTIONS: What is happening from start to end? Movement and changes.\n"
                 "EMOTIONS: Emotions on faces and body language. Overall emotional atmosphere.\n"
                 "ENERGY: Energy level (low / medium / high) and how it evolves.\n"
-                "CROWD: Audience or group presence, reaction and engagement level.\n\n"
+                "CROWD: Audience or group presence, reaction and engagement level.\n"
+                f"{focus_instruction}\n\n"
                 "Be specific and factual. Describe only what you can actually see."
             )
 

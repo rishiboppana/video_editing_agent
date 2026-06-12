@@ -1,5 +1,5 @@
 from agents.base_agent import BaseAgent
-from config import MAX_HIGHLIGHT_DURATION
+from config import FOCUS_POSITIONS, MAX_HIGHLIGHT_DURATION, ZOOM_MAX_LEVEL
 
 
 class HighlighterAgent(BaseAgent):
@@ -66,6 +66,13 @@ SELECTION RULES:
 5. DURATION CONSTRAINT: Total must not exceed {max_dur}s. Minimum is {int(max_dur * 0.7)}s.
    If you cannot fill the minimum with matching content, extend your best segments slightly.
 6. All start/end values must be plain numbers within 0–{video_duration}s.
+7. ZOOM: Each segment's FOCUS field tells you where the main subject/action sits in the
+   frame. For each highlight, decide whether punching in on that area would make the clip
+   more impactful — e.g. a single speaker, a small but important object, a face reacting.
+   - If yes, set "zoom": {{"position": "<that FOCUS value>", "level": a number between
+     1.1 and {ZOOM_MAX_LEVEL} (higher = tighter zoom)}}.
+   - If no — wide shots, group/crowd scenes, fast action, or FOCUS is "center" with
+     nothing specific to emphasize — set "zoom": {{"position": "center", "level": 1.0}}.
 {feedback_block}
 Return a JSON object with:
 - "highlights": list of selected clips, each with:
@@ -73,6 +80,7 @@ Return a JSON object with:
     - "start": start time in seconds (plain number)
     - "end": end time in seconds (plain number)
     - "reason": one sentence explaining exactly WHY this clip matches the request
+    - "zoom": {{"position": one of [{", ".join(FOCUS_POSITIONS)}], "level": 1.0-{ZOOM_MAX_LEVEL}}}
 - "total_duration": sum of clip durations (plain number)
 - "narrative": 1-2 sentences on what the highlight reel shows and why it matches the request
 
@@ -87,6 +95,10 @@ Return ONLY a JSON object."""
             result = {"highlights": result}
 
         highlights = result.get("highlights", [])
+
+        # Normalise zoom decisions in code — never trust the LLM to stick to
+        # the position vocabulary or level bounds.
+        highlights = [_normalise_zoom(h) for h in highlights]
 
         # Clamp to video bounds
         highlights = _clamp_highlights(highlights, video_duration)
@@ -148,12 +160,13 @@ def _build_segments_text(segments: list) -> str:
         end = s.get("end", 0)
         text = s.get("text", "")
         reason = s.get("reason", "")
+        focus = s.get("focus_position", "center")
 
         # Summarise the content: trim long descriptions but keep key signals
         content = str(text).strip()[:200]
 
         line = (
-            f"[id={sid} | {start}s-{end}s | importance={imp:.2f}]\n"
+            f"[id={sid} | {start}s-{end}s | importance={imp:.2f} | focus={focus}]\n"
             f"  CONTENT: {content if content else '(no description available)'}\n"
         )
         if reason:
@@ -167,6 +180,28 @@ def _safe_float(value, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _normalise_zoom(highlight: dict) -> dict:
+    """
+    Ensure every highlight has a well-formed "zoom" dict:
+      {"position": one of FOCUS_POSITIONS, "level": 1.0-ZOOM_MAX_LEVEL}
+
+    Falls back to a no-op zoom (center, 1.0) when the LLM omits the field,
+    returns the wrong type, or picks an unrecognised position/level.
+    """
+    zoom = highlight.get("zoom")
+    if not isinstance(zoom, dict):
+        return {**highlight, "zoom": {"position": "center", "level": 1.0}}
+
+    position = str(zoom.get("position", "center")).strip().lower()
+    if position not in FOCUS_POSITIONS:
+        position = "center"
+
+    level = _safe_float(zoom.get("level", 1.0), default=1.0)
+    level = max(1.0, min(level, ZOOM_MAX_LEVEL))
+
+    return {**highlight, "zoom": {"position": position, "level": round(level, 2)}}
 
 
 def _clamp_highlights(highlights: list, video_duration: float) -> list:
