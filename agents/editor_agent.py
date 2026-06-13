@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import subprocess
@@ -78,19 +79,46 @@ class EditorAgent(BaseAgent):
             raise RuntimeError(f"Clip cut failed [{start}-{end}]:\n{result.stderr[-500:]}")
 
     def _get_dimensions(self, video_path: str) -> tuple:
+        """
+        Returns (width, height) as ffmpeg's filter graph will actually see them.
+
+        ffprobe reports CODED dimensions, but ffmpeg auto-rotates frames based
+        on rotation metadata (the legacy 'rotate' tag or a Display Matrix side
+        data entry) before filters run. For a 90/270-rotated portrait video,
+        the coded size might be 1920x1080 while the decoded frame fed to the
+        crop filter is actually 1080x1920 — so we swap width/height when a
+        90/270 rotation is present to keep the crop filter in bounds.
+        """
         cmd = [
             FFPROBE_PATH, "-v", "error",
             "-select_streams", "v:0",
-            "-show_entries", "stream=width,height",
-            "-of", "csv=p=0:s=x",
+            "-show_entries", "stream",
+            "-of", "json",
             video_path,
         ]
         result = subprocess.run(cmd, capture_output=True, text=True)
         try:
-            width, height = result.stdout.strip().split("x")
-            return int(width), int(height)
-        except (ValueError, AttributeError):
+            stream = json.loads(result.stdout)["streams"][0]
+            width, height = int(stream["width"]), int(stream["height"])
+        except (KeyError, IndexError, ValueError, json.JSONDecodeError):
             return 0, 0
+
+        rotation = 0
+        try:
+            rotation = int(stream.get("tags", {}).get("rotate", 0))
+        except (TypeError, ValueError):
+            pass
+        for side_data in stream.get("side_data_list", []):
+            if "rotation" in side_data:
+                try:
+                    rotation = int(side_data["rotation"])
+                except (TypeError, ValueError):
+                    pass
+
+        if abs(rotation) % 180 == 90:
+            width, height = height, width
+
+        return width, height
 
     def _join_clips(self, clip_paths: list, output_path: str):
         if len(clip_paths) == 1:
