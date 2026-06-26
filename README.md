@@ -28,6 +28,10 @@ video.mp4
 │  HighlighterAgent    │   → selected clips + zoom/focus decision per clip
 └──────────┬───────────┘
            ▼
+┌─────────────────────┐   Ollama LLM
+│ MusicRecommenderAgent│   → genre, mood, tempo, instrumentation recommendation
+└──────────┬───────────┘
+           ▼
 ┌─────────────────────┐   ffmpeg
 │  EditorAgent         │   → cuts, zooms, joins clips into the final video
 └──────────┬───────────┘
@@ -35,7 +39,7 @@ video.mp4
     output/<name>_highlight.mp4
 ```
 
-An **Orchestrator** sits above all four agents. After every agent runs it validates the output structurally, and for the two LLM-based agents (Explainer, Highlighter) it also asks the LLM to review its own output and retries with targeted feedback if not satisfactory — up to 3 attempts per step.
+An **Orchestrator** sits above all five agents. After every agent runs it validates the output structurally, and for the LLM-based agents (Explainer, Highlighter, MusicRecommender) it also asks the LLM to review its own output and retries with targeted feedback if not satisfactory — up to 3 attempts per step.
 
 ---
 
@@ -46,6 +50,7 @@ An **Orchestrator** sits above all four agents. After every agent runs it valida
 | `TranscriberAgent` | No (Whisper + ffmpeg + LLaVA) | Transcribes speech, detects scene cuts, describes each scene in rich detail (people, objects, setting, actions, emotions, energy, crowd, focus position) |
 | `ExplainerAgent` | Yes (Ollama + embeddings) | Builds a synchronized speech+visual timeline, scores every segment's importance, blends the LLM score with embedding similarity to the user's style |
 | `HighlighterAgent` | Yes (Ollama) | Selects which segments make the final cut based on content match (not just duration filling), merges adjacent clips, decides zoom/focus per clip |
+| `MusicRecommenderAgent` | Yes (Ollama) | Recommends a music genre, mood, tempo, and instrumentation that fits the final reel's tone and content |
 | `EditorAgent` | No (ffmpeg) | Cuts each clip, applies the zoom/crop filter, joins everything into the final video |
 
 ---
@@ -74,6 +79,15 @@ If no style is given, the agent defaults to finding the best overall moments fro
 
 ### Auto-zoom / focus
 LLaVA tags each scene with a focus position on a 3×3 grid (`top-left` … `center` … `bottom-right`). The Highlighter decides a zoom level (1.0–1.6x) per selected clip, and the Editor applies it as an ffmpeg crop+scale filter — correctly handling rotated/portrait video dimensions.
+
+### Music recommendation
+After clips are selected, a dedicated agent looks at the reel's tone, pacing, content, and the user's style preference, then recommends:
+- Primary genre + 2 alternatives (e.g. "Upbeat Indie Pop")
+- Mood, suggested tempo (BPM range), and instrumentation
+- How the energy should build across the reel's duration
+- 2-3 well-known songs/artists as a **style reference only**
+
+This is a text recommendation, not an automatic audio overlay — no track is sourced, downloaded, or attached, since licensing is the user's responsibility. Disable with `ENABLE_MUSIC_RECOMMENDATION=false` for a faster run.
 
 ### Robust JSON handling
 LLM responses are repaired through several stages before giving up:
@@ -154,6 +168,7 @@ python main.py videos/Concert.mp4 --json
 | `EMBED_WEIGHT` | `0.4` | Weight of embedding similarity vs LLM score |
 | `SCENE_THRESHOLD` | `0.15` | ffmpeg scene-cut sensitivity (lower = more cuts) |
 | `ZOOM_MAX_LEVEL` | `1.6` | Maximum zoom magnification for auto-crop |
+| `ENABLE_MUSIC_RECOMMENDATION` | `true` | Toggle the music genre/mood/tempo recommendation step |
 
 ---
 
@@ -189,6 +204,7 @@ video_editing_agent/
 │   ├── transcriber_agent.py # Whisper + ffmpeg scenes + LLaVA vision
 │   ├── explainer_agent.py   # Importance scoring + style embeddings
 │   ├── highlighter_agent.py # Clip selection + zoom decisions
+│   ├── music_agent.py       # Music genre/mood/tempo recommendation
 │   └── editor_agent.py      # ffmpeg cut/zoom/join
 ├── colab_setup.ipynb        # One-click GPU pipeline on Colab
 ├── requirements.txt

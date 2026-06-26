@@ -5,8 +5,9 @@ from agents.base_agent import BaseAgent
 from agents.editor_agent import EditorAgent
 from agents.explainer_agent import ExplainerAgent
 from agents.highlighter_agent import HighlighterAgent
+from agents.music_agent import MusicRecommenderAgent
 from agents.transcriber_agent import TranscriberAgent
-from config import MAX_HIGHLIGHT_DURATION, MAX_RETRIES, OLLAMA_MODEL
+from config import ENABLE_MUSIC_RECOMMENDATION, MAX_HIGHLIGHT_DURATION, MAX_RETRIES, OLLAMA_MODEL
 
 logging.basicConfig(
     level=logging.INFO,
@@ -35,6 +36,7 @@ class OrchestratorAgent(BaseAgent):
         self.transcriber = TranscriberAgent()
         self.explainer = ExplainerAgent()
         self.highlighter = HighlighterAgent()
+        self.music_recommender = MusicRecommenderAgent()
         self.editor = EditorAgent()
 
     # ------------------------------------------------------------------
@@ -58,8 +60,10 @@ class OrchestratorAgent(BaseAgent):
             logger.info(f"  style      : {style}")
         logger.info(DIVIDER)
 
+        total_steps = 5 if ENABLE_MUSIC_RECOMMENDATION else 4
+
         # ── Step 1: Transcription ───────────────────────────────────────
-        logger.info("\n[STEP 1/4]  TRANSCRIPTION")
+        logger.info(f"\n[STEP 1/{total_steps}]  TRANSCRIPTION")
         transcript = self._run_with_retry(
             agent=self.transcriber,
             run_kwargs={"video_path": video_path},
@@ -78,7 +82,7 @@ class OrchestratorAgent(BaseAgent):
             )
 
         # ── Step 2: Explanation ─────────────────────────────────────────
-        logger.info("\n[STEP 2/4]  EXPLANATION")
+        logger.info(f"\n[STEP 2/{total_steps}]  EXPLANATION")
         explanation = self._run_with_retry(
             agent=self.explainer,
             run_kwargs={"transcript": transcript, "video_type": video_type, "style": style},
@@ -92,7 +96,7 @@ class OrchestratorAgent(BaseAgent):
         logger.info(f"  → tone   : {explanation.get('tone', 'unknown')}")
 
         # ── Step 3: Highlight selection ─────────────────────────────────
-        logger.info("\n[STEP 3/4]  HIGHLIGHT SELECTION")
+        logger.info(f"\n[STEP 3/{total_steps}]  HIGHLIGHT SELECTION")
         highlights_data = self._run_with_retry(
             agent=self.highlighter,
             run_kwargs={
@@ -113,12 +117,32 @@ class OrchestratorAgent(BaseAgent):
         )
         logger.info(f"  → narrative: {highlights_data.get('narrative', '')[:160]}")
 
-        # ── Step 4: Video editing ───────────────────────────────────────
+        # ── Step 4: Music recommendation ────────────────────────────────
+        music_data = {}
+        if ENABLE_MUSIC_RECOMMENDATION:
+            logger.info(f"\n[STEP 4/{total_steps}]  MUSIC RECOMMENDATION")
+            music_data = self._run_with_retry(
+                agent=self.music_recommender,
+                run_kwargs={
+                    "explained_data": explanation,
+                    "highlights_data": highlights_data,
+                    "style": style,
+                },
+                review_context=(
+                    f"Recommending music for a {highlights_data['total_duration']}s "
+                    f"highlight reel. Tone: '{explanation.get('tone')}'. Style: '{style or 'none'}'."
+                ),
+            )
+            logger.info(f"  → genre: {music_data.get('primary_genre')}")
+            logger.info(f"  → mood : {music_data.get('mood')}")
+            logger.info(f"  → tempo: {music_data.get('tempo_bpm')}")
+
+        # ── Step 5: Video editing ───────────────────────────────────────
         ordered_highlights = sorted(
             highlights_data["highlights"], key=lambda h: h["start"]
         )
 
-        logger.info("\n[STEP 4/4]  VIDEO EDITING")
+        logger.info(f"\n[STEP {total_steps}/{total_steps}]  VIDEO EDITING")
         edit_result = self._run_with_retry(
             agent=self.editor,
             run_kwargs={
@@ -149,10 +173,12 @@ class OrchestratorAgent(BaseAgent):
             "style": style,
             "video_type": video_type,
             "narrative": highlights_data.get("narrative"),
+            "music_recommendation": music_data,
             "pipeline": {
                 "transcript": transcript,
                 "explanation": explanation,
                 "highlights": highlights_data,
+                "music": music_data,
             },
         }
 

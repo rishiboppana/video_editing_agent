@@ -110,6 +110,22 @@ def main():
             print(f"Topics          : {', '.join(result['topics'])}")
             print(f"Narrative       : {result['narrative']}")
 
+            music = result.get("music_recommendation") or {}
+            if music:
+                print(f"\n--- Music Recommendation ---")
+                print(f"Genre           : {music.get('primary_genre')}")
+                print(f"Mood            : {music.get('mood')}")
+                print(f"Tempo           : {music.get('tempo_bpm')}")
+                print(f"Instrumentation : {music.get('instrumentation')}")
+                print(f"Energy curve    : {music.get('energy_curve')}")
+                alts = music.get("alternative_genres") or []
+                if alts:
+                    print(f"Alternatives    : {', '.join(alts)}")
+                refs = music.get("reference_style_examples") or []
+                if refs:
+                    print(f"Style reference : {', '.join(refs)} (for inspiration only — source your own licensed track)")
+                print(f"Why             : {music.get('reasoning')}")
+
     except KeyboardInterrupt:
         print("\nAborted.", file=sys.stderr)
         sys.exit(1)

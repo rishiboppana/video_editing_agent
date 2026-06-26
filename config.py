@@ -36,6 +36,11 @@ VISION_TIMEOUT = int(os.getenv("VISION_TIMEOUT", "180"))
 VISION_MULTI_FRAME_MIN = float(os.getenv("VISION_MULTI_FRAME_MIN", "15.0"))
 VISION_MAX_CONSECUTIVE_FAILURES = int(os.getenv("VISION_MAX_CONSECUTIVE_FAILURES", "2"))
 
+# ── Music Recommendation ──────────────────────────────────────────────
+# Text-only recommendation (genre/mood/tempo) — does not source or attach
+# any actual audio file. Disable if you want a faster pipeline.
+ENABLE_MUSIC_RECOMMENDATION = os.getenv("ENABLE_MUSIC_RECOMMENDATION", "true").lower() in ("1", "true", "yes")
+
 # ── Zoom / Focus ──────────────────────────────────────────────────────
 # Shared 3x3 grid vocabulary used by:
 #   - TranscriberAgent  : LLaVA reports where the subject/action is in frame
