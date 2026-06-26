@@ -111,7 +111,13 @@ Each VISUAL line shows a scene with no concurrent speech.
 IMPORTANT: All "start" and "end" values must be plain numbers (e.g. 4.5 not "4.5s").
 Importance must be a float 0.0-1.0 (e.g. 0.8 not "high").
 
-Return a JSON object with:
+CRITICAL ORDERING RULE: Write "summary", "topics", "tone", and "pacing" FIRST,
+before "segments". The segments list can be long and may get cut off if you
+run out of space — but summary/topics/tone/pacing are short and MUST always
+be complete in your response, even if you have to shorten "segments" or the
+per-segment "reason" text to fit.
+
+Return a JSON object with these keys IN THIS ORDER:
 - "summary": 2-3 sentences synthesizing what was said AND what was seen
 - "topics": list of main topics (strings)
 - "tone": overall tone (e.g. comedic, musical, action, educational, emotional)
@@ -123,7 +129,7 @@ Return a JSON object with:
     - "end": end seconds
     - "text": the speech quote or visual description
     - "importance": 0.0-1.0 (1.0 = must be in the highlight reel)
-    - "reason": one sentence on why this score
+    - "reason": a SHORT phrase (3-6 words) on why this score — keep it brief
 
 Video overview:
   Duration   : {transcript.get('duration', '?')}s
@@ -257,16 +263,30 @@ Return ONLY a JSON object."""
     # ------------------------------------------------------------------
 
     def validate(self, output: dict, **kwargs) -> tuple:
-        for field in ("summary", "topics", "tone", "segments"):
-            if field not in output:
-                return False, f"Missing required field: {field}"
-        if not output["summary"].strip():
-            return False, "summary is empty"
-        if not output["segments"]:
+        # segments is the only field we truly cannot synthesize — it's the
+        # merged audio/visual data, always populated by _merge_all_segments.
+        if not output.get("segments"):
             return False, "segments list is empty"
 
         for seg in output["segments"]:
             seg["importance"] = _normalise_importance(seg.get("importance"))
+
+        # Auto-heal summary/topics/tone/pacing instead of failing the whole
+        # output. These can go missing if the LLM's response got truncated
+        # before writing them (e.g. a long segments array ate the token
+        # budget). We can reconstruct a reasonable version from the segments
+        # themselves rather than burning 3 retries on the identical truncation.
+        if not str(output.get("summary", "")).strip():
+            output["summary"] = _synthesize_summary(output["segments"])
+            logger.info("  [ExplainerAgent] summary missing — synthesized from segments")
+        if not isinstance(output.get("topics"), list):
+            output["topics"] = []
+        if not str(output.get("tone", "")).strip():
+            output["tone"] = "unknown"
+        if not str(output.get("pacing", "")).strip():
+            output["pacing"] = "unknown"
+        if "key_moments" not in output:
+            output["key_moments"] = []
 
         return True, f"{len(output['segments'])} segments analyzed"
 
@@ -401,6 +421,23 @@ Return ONLY a JSON object."""
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
+
+def _synthesize_summary(segments: list) -> str:
+    """
+    Build a fallback summary from segment text when the LLM's response was
+    truncated before writing the summary field. Picks the highest-importance
+    segments' text to give a reasonable approximation.
+    """
+    texts = [
+        str(s.get("text", "")).strip()
+        for s in sorted(segments, key=lambda s: -float(s.get("importance", 0)))
+        if str(s.get("text", "")).strip()
+    ]
+    if not texts:
+        return "Video content summary unavailable — no speech or visual descriptions found."
+    preview = " ".join(texts)[:300]
+    return f"Video featuring: {preview}"
+
 
 _TEXT_TO_IMPORTANCE = {
     "low": 0.2, "medium": 0.5, "moderate": 0.5,
