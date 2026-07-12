@@ -8,6 +8,3 @@ requests>=2.31.0
 # Utilities
 numpy>=1.24.0
 
-# Video semantic search
-imagehash>=4.3.1    # perceptual hashing for frame deduplication
-Pillow>=10.0.0      # image I/O (required by imagehash)
